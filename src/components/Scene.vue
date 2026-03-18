@@ -1,15 +1,19 @@
 <template>
   <div class="scene-container">
     <TresCanvas clear-color="#0f172a" style="width: 100%; height: 100%;">
-      <TresPerspectiveCamera :position="[5, 5, 5]" :look-at="[0, 0, 0]" />
-      <OrbitControls />
+      <TresPerspectiveCamera :position="cameraPosition" />
+      <OrbitControls :target="controlsTarget" />
       <TresDirectionalLight :position="[5, 5, 5]" :intensity="1" />
       <TresAmbientLight :intensity="0.5" />
 
-      <TresMesh v-if="activeMeshGeometry" :geometry="activeMeshGeometry">
+      <!-- Render every part in the multi-part assembly -->
+      <TresMesh v-for="(item, idx) in assembly" :key="idx" :geometry="item.geometry" :position="item.position"
+        :rotation="item.rotation" :visible="item.visible">
         <TresMeshStandardMaterial color="#3b82f6" :wireframe="isWireframe" />
       </TresMesh>
-      <AnimatedBox v-else />
+
+      <!-- Placeholder when nothing is loaded -->
+      <AnimatedBox v-if="assembly.length === 0" />
     </TresCanvas>
   </div>
 </template>
@@ -17,7 +21,7 @@
 <script setup lang="ts">
 import { OrbitControls } from '@tresjs/cientos';
 import AnimatedBox from './AnimatedBox.vue';
-import { activeMeshGeometry, isWireframe } from '../store';
+import { assembly, isWireframe, cameraPosition, controlsTarget } from '../store';
 </script>
 
 <style scoped>
