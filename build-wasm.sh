@@ -17,7 +17,7 @@ emcc "src/math/geometry.cpp" \
   -s WASM=1 \
   -s MODULARIZE=1 \
   -s EXPORT_NAME="GeometryModule" \
-  -s EXPORTED_FUNCTIONS='["_scaleVerticesY", "_scaleVertices", "_malloc", "_free"]' \
+  -s EXPORTED_FUNCTIONS='["_scaleVerticesY", "_scaleVertices", "_scaleVerticesWithAnalytics", "_malloc", "_free"]' \
   -s EXPORTED_RUNTIME_METHODS='["ccall", "cwrap", "HEAPF32"]' \
   -s ALLOW_MEMORY_GROWTH=1
 

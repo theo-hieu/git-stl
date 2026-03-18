@@ -26,3 +26,5 @@ dist-ssr
 # Wasm generated files
 public/geometry.wasm
 public/geometry.js
+public/stl_parser.wasm
+public/stl_parser.js

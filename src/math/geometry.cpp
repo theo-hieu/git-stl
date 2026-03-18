@@ -1,54 +1,120 @@
-/**
- * geometry.cpp
- *
- * C++ math engine for WebAssembly.
- *
- * Exports:
- *   scaleVerticesY  — legacy single-axis Y scaler (kept for compatibility)
- *   scaleVertices   — full XYZ scaler (new)
- *
- * Both functions operate in-place on a flat Float32Array laid out as
- * [x0, y0, z0, x1, y1, z1, ...].
- *
- * Compile with Emscripten (see build-wasm.sh).
- */
+#include <cmath>
+#include <cstddef>
+#include <limits>
 
-#include <cstddef> // size_t
+namespace {
+
+constexpr int kAnalyticsFloatCount = 7;
+
+void scaleVertex(float *vertices, int index, float scaleX, float scaleY,
+                 float scaleZ) {
+  vertices[index] *= scaleX;
+  vertices[index + 1] *= scaleY;
+  vertices[index + 2] *= scaleZ;
+}
+
+void updateBounds(const float *vertices, int index, float &minX, float &minY,
+                  float &minZ, float &maxX, float &maxY, float &maxZ) {
+  const float x = vertices[index];
+  const float y = vertices[index + 1];
+  const float z = vertices[index + 2];
+
+  if (x < minX) minX = x;
+  if (y < minY) minY = y;
+  if (z < minZ) minZ = z;
+  if (x > maxX) maxX = x;
+  if (y > maxY) maxY = y;
+  if (z > maxZ) maxZ = z;
+}
+
+double accumulateTriangleVolume(const float *vertices, int index) {
+  const double ax = static_cast<double>(vertices[index]);
+  const double ay = static_cast<double>(vertices[index + 1]);
+  const double az = static_cast<double>(vertices[index + 2]);
+  const double bx = static_cast<double>(vertices[index + 3]);
+  const double by = static_cast<double>(vertices[index + 4]);
+  const double bz = static_cast<double>(vertices[index + 5]);
+  const double cx = static_cast<double>(vertices[index + 6]);
+  const double cy = static_cast<double>(vertices[index + 7]);
+  const double cz = static_cast<double>(vertices[index + 8]);
+
+  return (ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) +
+          az * (bx * cy - by * cx)) /
+         6.0;
+}
+
+void writeAnalytics(float *analyticsOut, float minX, float minY, float minZ,
+                    float maxX, float maxY, float maxZ, double signedVolume) {
+  if (analyticsOut == nullptr) {
+    return;
+  }
+
+  analyticsOut[0] = minX;
+  analyticsOut[1] = minY;
+  analyticsOut[2] = minZ;
+  analyticsOut[3] = maxX;
+  analyticsOut[4] = maxY;
+  analyticsOut[5] = maxZ;
+  analyticsOut[6] = static_cast<float>(std::abs(signedVolume));
+}
+
+} // namespace
 
 extern "C" {
 
-/**
- * Legacy: multiplies every Y component by `scale`.
- *
- * @param vertices  Pointer to a flat float array [x,y,z, x,y,z, ...]
- * @param length    Total number of floats (vertex_count * 3)
- * @param scale     Multiplier applied to every Y component
- */
 void scaleVerticesY(float *vertices, int length, float scale) {
-  for (int i = 1; i < length; i += 3) {
-    vertices[i] *= scale;
+  if (vertices == nullptr || length <= 0) {
+    return;
+  }
+
+  for (int index = 1; index < length; index += 3) {
+    vertices[index] *= scale;
   }
 }
 
-/**
- * Full XYZ scale: multiplies each component by its own scale factor.
- *
- * @param vertices  Pointer to a flat float array [x,y,z, x,y,z, ...]
- * @param length    Total number of floats (vertex_count * 3)
- * @param scaleX    Multiplier applied to every X component (index 0, 3, 6, …)
- * @param scaleY    Multiplier applied to every Y component (index 1, 4, 7, …)
- * @param scaleZ    Multiplier applied to every Z component (index 2, 5, 8, …)
- *
- * The array is mutated in-place; the caller reads the result back
- * from the same Wasm heap memory.
- */
 void scaleVertices(float *vertices, int length, float scaleX, float scaleY,
                    float scaleZ) {
-  for (int i = 0; i < length; i += 3) {
-    vertices[i] *= scaleX;
-    vertices[i + 1] *= scaleY;
-    vertices[i + 2] *= scaleZ;
+  if (vertices == nullptr || length <= 0) {
+    return;
   }
+
+  for (int index = 0; index + 2 < length; index += 3) {
+    scaleVertex(vertices, index, scaleX, scaleY, scaleZ);
+  }
+}
+
+void scaleVerticesWithAnalytics(float *vertices, int length, float scaleX,
+                                float scaleY, float scaleZ,
+                                float *analyticsOut) {
+  if (analyticsOut != nullptr) {
+    for (int index = 0; index < kAnalyticsFloatCount; ++index) {
+      analyticsOut[index] = 0.0f;
+    }
+  }
+
+  if (vertices == nullptr || length <= 0 || analyticsOut == nullptr) {
+    return;
+  }
+
+  float minX = std::numeric_limits<float>::infinity();
+  float minY = std::numeric_limits<float>::infinity();
+  float minZ = std::numeric_limits<float>::infinity();
+  float maxX = -std::numeric_limits<float>::infinity();
+  float maxY = -std::numeric_limits<float>::infinity();
+  float maxZ = -std::numeric_limits<float>::infinity();
+  double signedVolume = 0.0;
+
+  for (int index = 0; index + 2 < length; index += 3) {
+    scaleVertex(vertices, index, scaleX, scaleY, scaleZ);
+    updateBounds(vertices, index, minX, minY, minZ, maxX, maxY, maxZ);
+  }
+
+  for (int index = 0; index + 8 < length; index += 9) {
+    signedVolume += accumulateTriangleVolume(vertices, index);
+  }
+
+  writeAnalytics(analyticsOut, minX, minY, minZ, maxX, maxY, maxZ,
+                 signedVolume);
 }
 
 } // extern "C"

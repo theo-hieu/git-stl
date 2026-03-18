@@ -1,3 +1,4 @@
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -5,6 +6,8 @@
 
 namespace {
 
+constexpr int kInvalidStlErrorCode = -1;
+constexpr int kAsciiStlErrorCode = -2;
 constexpr std::uint32_t kBinaryStlHeaderBytes = 80;
 constexpr std::uint32_t kTriangleCountBytes = 4;
 constexpr std::uint32_t kBinaryStlPreambleBytes =
@@ -32,14 +35,80 @@ float readF32LE(const std::uint8_t *src) {
   return value;
 }
 
+char lowerAscii(std::uint8_t byte) {
+  return static_cast<char>(std::tolower(static_cast<unsigned char>(byte)));
+}
+
+bool startsWithSolid(const std::uint8_t *data, int length) {
+  if (data == nullptr || length < 5) {
+    return false;
+  }
+
+  int offset = 0;
+  while (offset < length && std::isspace(static_cast<unsigned char>(data[offset]))) {
+    ++offset;
+  }
+
+  if (offset + 5 > length) {
+    return false;
+  }
+
+  return lowerAscii(data[offset]) == 's' && lowerAscii(data[offset + 1]) == 'o' &&
+         lowerAscii(data[offset + 2]) == 'l' && lowerAscii(data[offset + 3]) == 'i' &&
+         lowerAscii(data[offset + 4]) == 'd';
+}
+
+bool containsFacetKeyword(const std::uint8_t *data, int length) {
+  if (data == nullptr || length < 5) {
+    return false;
+  }
+
+  const int scanLimit = length < 512 ? length : 512;
+
+  for (int index = 0; index <= scanLimit - 5; ++index) {
+    if (lowerAscii(data[index]) == 'f' && lowerAscii(data[index + 1]) == 'a' &&
+        lowerAscii(data[index + 2]) == 'c' && lowerAscii(data[index + 3]) == 'e' &&
+        lowerAscii(data[index + 4]) == 't') {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool looksLikeAsciiStl(const std::uint8_t *data, int length) {
+  if (!startsWithSolid(data, length)) {
+    return false;
+  }
+
+  if (length < static_cast<int>(kBinaryStlPreambleBytes)) {
+    return true;
+  }
+
+  const std::uint32_t triangleCount = readU32LE(data + kBinaryStlHeaderBytes);
+  const std::uint64_t requiredBytes =
+      static_cast<std::uint64_t>(kBinaryStlPreambleBytes) +
+      static_cast<std::uint64_t>(triangleCount) * kTriangleRecordBytes;
+
+  if (requiredBytes == static_cast<std::uint64_t>(length)) {
+    return false;
+  }
+
+  return containsFacetKeyword(data, length);
+}
+
 int computeFloatCount(const std::uint8_t *data, int length) {
   if (data == nullptr || length < 0) {
-    return -1;
+    return kInvalidStlErrorCode;
+  }
+
+  if (looksLikeAsciiStl(data, length)) {
+    return kAsciiStlErrorCode;
   }
 
   const auto byteLength = static_cast<std::uint64_t>(length);
   if (byteLength < kBinaryStlPreambleBytes) {
-    return -1;
+    return kInvalidStlErrorCode;
   }
 
   const std::uint32_t triangleCount = readU32LE(data + kBinaryStlHeaderBytes);
@@ -48,13 +117,13 @@ int computeFloatCount(const std::uint8_t *data, int length) {
       static_cast<std::uint64_t>(triangleCount) * kTriangleRecordBytes;
 
   if (requiredBytes > byteLength) {
-    return -1;
+    return kInvalidStlErrorCode;
   }
 
   const std::uint64_t floatCount =
       static_cast<std::uint64_t>(triangleCount) * kFloatsPerTriangle;
   if (floatCount > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-    return -1;
+    return kInvalidStlErrorCode;
   }
 
   return static_cast<int>(floatCount);
@@ -70,11 +139,7 @@ int getBinaryStlFloatCount(const std::uint8_t *data, int length) {
 
 float *parseBinaryStl(const std::uint8_t *data, int length) {
   const int floatCount = computeFloatCount(data, length);
-  if (floatCount < 0) {
-    return nullptr;
-  }
-
-  if (floatCount == 0) {
+  if (floatCount <= 0) {
     return nullptr;
   }
 

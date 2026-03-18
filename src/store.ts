@@ -1,47 +1,68 @@
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import type { BufferGeometry } from "three";
 
-// ── Assembly ──────────────────────────────────────────────────────────────────
+export type AssemblyVector3 = [number, number, number];
 
-/** A single loaded STL part inside the multi-part assembly. */
+let assemblyItemSequence = 0;
+
+function createAssemblyItemId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+
+  assemblyItemSequence += 1;
+  return `assembly-item-${assemblyItemSequence}`;
+}
+
 export interface AssemblyItem {
-  /** Display name (filename) */
+  id: string;
   name: string;
-  /** Three.js BufferGeometry parsed from the STL */
+  sourcePath: string;
   geometry: BufferGeometry;
-  /** Relative XYZ position offset (TresMesh :position) */
-  position: [number, number, number];
-  /** Relative XYZ Euler rotation in radians (TresMesh :rotation) */
-  rotation: [number, number, number];
-  /** Whether the mesh is visible in the 3D canvas */
+  position: AssemblyVector3;
+  rotation: AssemblyVector3;
   visible: boolean;
 }
 
-/**
- * Reactive array of all loaded STL parts.
- * "Open File" appends to this; the TresJS canvas renders every item.
- */
+export interface CreateAssemblyItemInput {
+  id?: string;
+  name: string;
+  sourcePath: string;
+  geometry: BufferGeometry;
+  position?: AssemblyVector3;
+  rotation?: AssemblyVector3;
+  visible?: boolean;
+}
+
+export function createAssemblyItem(
+  input: CreateAssemblyItemInput,
+): AssemblyItem {
+  return {
+    id: input.id ?? createAssemblyItemId(),
+    name: input.name,
+    sourcePath: input.sourcePath,
+    geometry: input.geometry,
+    position: input.position ?? [0, 0, 0],
+    rotation: input.rotation ?? [0, 0, 0],
+    visible: input.visible ?? true,
+  };
+}
+
 export const assembly = ref<AssemblyItem[]>([]);
+export const selectedItemId = ref<string | null>(null);
+export const selectedAssemblyItem = computed<AssemblyItem | null>(() => {
+  if (!selectedItemId.value) {
+    return null;
+  }
 
-// ── Active file metadata ──────────────────────────────────────────────────────
+  return assembly.value.find((item) => item.id === selectedItemId.value) ?? null;
+});
 
-/** Filename of the most-recently-opened STL (used for git versioning). */
+export const activeProjectName = ref<string | null>(null);
 export const activeMeshName = ref<string | null>(null);
-
-// ── View options ──────────────────────────────────────────────────────────────
-
 export const isWireframe = ref(false);
-
-// ── XYZ Scale factors (shared between Sidebar and any future consumer) ────────
-
 export const scaleX = ref(1);
 export const scaleY = ref(1);
 export const scaleZ = ref(1);
-
-// ── Camera / OrbitControls state ──────────────────────────────────────────────
-
-/** World-space position of TresPerspectiveCamera. Updated by "Frame Assembly". */
-export const cameraPosition = ref<[number, number, number]>([50, 50, 50]);
-
-/** OrbitControls look-at target. Updated by "Frame Assembly". */
-export const controlsTarget = ref<[number, number, number]>([0, 0, 0]);
+export const cameraPosition = ref<AssemblyVector3>([50, 50, 50]);
+export const controlsTarget = ref<AssemblyVector3>([0, 0, 0]);
