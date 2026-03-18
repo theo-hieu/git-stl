@@ -1,24 +1,4 @@
-interface EmscriptenModule {
-  _malloc(bytes: number): number;
-  _free(ptr: number): void;
-  _scaleVerticesY(ptr: number, length: number, scale: number): void;
-  _scaleVertices(
-    ptr: number,
-    length: number,
-    scaleX: number,
-    scaleY: number,
-    scaleZ: number,
-  ): void;
-  _scaleVerticesWithAnalytics?(
-    ptr: number,
-    length: number,
-    scaleX: number,
-    scaleY: number,
-    scaleZ: number,
-    analyticsPtr: number,
-  ): void;
-  HEAPF32: Float32Array;
-}
+import { createGeometryModule, type GeometryModule } from "./geometryModule";
 
 export interface GeometryBounds {
   min: [number, number, number];
@@ -34,22 +14,39 @@ export interface ScaledGeometryResult {
 const ANALYTICS_FLOAT_COUNT = 7;
 
 export class WasmEngine {
-  private static scriptPromise: Promise<void> | null = null;
-  private static modulePromise: Promise<EmscriptenModule> | null = null;
+  private static modulePromise: Promise<GeometryModule> | null = null;
 
-  private constructor(private readonly mod: EmscriptenModule) {}
+  private constructor(private readonly mod: GeometryModule | null) {}
 
   static async create(): Promise<WasmEngine> {
-    const mod = await WasmEngine.loadModule();
-    return new WasmEngine(mod);
+    try {
+      const mod = await WasmEngine.loadModule();
+      return new WasmEngine(mod);
+    } catch (error) {
+      console.warn(
+        "[WasmEngine] Falling back to JavaScript scaling because the Wasm module could not be loaded.",
+        error,
+      );
+      return new WasmEngine(null);
+    }
   }
 
   scaleVerticesY(vertices: Float32Array, scale: number): Float32Array {
+    const mod = this.mod;
+    if (!mod) {
+      const scaled = vertices.slice();
+      for (let index = 1; index < scaled.length; index += 3) {
+        scaled[index] *= scale;
+      }
+
+      return scaled;
+    }
+
     return this.callWithHeapBuffers({
       vertices,
       outputFloatCount: 0,
       invoke: ({ inputPtr, elementCount }) => {
-        this.mod._scaleVerticesY(inputPtr, elementCount, scale);
+        mod._scaleVerticesY(inputPtr, elementCount, scale);
       },
       readResult: ({ inputPtr, elementCount, heapF32 }) =>
         heapF32.slice(inputPtr >> 2, (inputPtr >> 2) + elementCount),
@@ -62,7 +59,8 @@ export class WasmEngine {
     scaleY: number,
     scaleZ: number,
   ): ScaledGeometryResult {
-    if (typeof this.mod._scaleVerticesWithAnalytics === "function") {
+    const mod = this.mod;
+    if (mod && typeof mod._scaleVerticesWithAnalytics === "function") {
       return this.callWithHeapBuffers({
         vertices,
         outputFloatCount: ANALYTICS_FLOAT_COUNT,
@@ -71,7 +69,7 @@ export class WasmEngine {
             throw new Error("[WasmEngine] analytics buffer allocation failed.");
           }
 
-          this.mod._scaleVerticesWithAnalytics?.(
+          mod._scaleVerticesWithAnalytics?.(
             inputPtr,
             elementCount,
             scaleX,
@@ -111,24 +109,12 @@ export class WasmEngine {
     );
   }
 
-  private static async loadModule(): Promise<EmscriptenModule> {
+  private static async loadModule(): Promise<GeometryModule> {
     if (!WasmEngine.modulePromise) {
-      WasmEngine.modulePromise = (async () => {
-        await WasmEngine.injectScript("/geometry.js");
-        const factory = (
-          globalThis as {
-            GeometryModule?: () => Promise<EmscriptenModule>;
-          }
-        ).GeometryModule;
-
-        if (typeof factory !== "function") {
-          throw new Error(
-            "[WasmEngine] GeometryModule not found. Rebuild the Wasm artifacts in public/.",
-          );
-        }
-
-        return factory();
-      })();
+      WasmEngine.modulePromise = createGeometryModule().catch((error) => {
+        WasmEngine.modulePromise = null;
+        throw error;
+      });
     }
 
     return WasmEngine.modulePromise;
@@ -140,23 +126,28 @@ export class WasmEngine {
     invoke,
     readResult,
   }: HeapCallConfig<T>): T {
-    const inputPtr = this.mod._malloc(vertices.byteLength);
+    const mod = this.mod;
+    if (!mod) {
+      throw new Error("[WasmEngine] Wasm heap call requested without a loaded module.");
+    }
+
+    const inputPtr = mod._malloc(vertices.byteLength);
     if (inputPtr === 0) {
       throw new Error("[WasmEngine] malloc failed for the input vertex buffer.");
     }
 
     const outputPtr =
       outputFloatCount > 0
-        ? this.mod._malloc(outputFloatCount * Float32Array.BYTES_PER_ELEMENT)
+        ? mod._malloc(outputFloatCount * Float32Array.BYTES_PER_ELEMENT)
         : 0;
 
     if (outputFloatCount > 0 && outputPtr === 0) {
-      this.mod._free(inputPtr);
+      mod._free(inputPtr);
       throw new Error("[WasmEngine] malloc failed for the output analytics buffer.");
     }
 
     try {
-      this.mod.HEAPF32.set(vertices, inputPtr >> 2);
+      mod.HEAPF32.set(vertices, inputPtr >> 2);
       invoke({
         elementCount: vertices.length,
         inputPtr,
@@ -165,16 +156,16 @@ export class WasmEngine {
 
       return readResult({
         elementCount: vertices.length,
-        heapF32: this.mod.HEAPF32,
+        heapF32: mod.HEAPF32,
         inputPtr,
         outputPtr,
       });
     } finally {
       if (outputPtr !== 0) {
-        this.mod._free(outputPtr);
+        mod._free(outputPtr);
       }
 
-      this.mod._free(inputPtr);
+      mod._free(inputPtr);
     }
   }
 
@@ -184,12 +175,13 @@ export class WasmEngine {
     scaleY: number,
     scaleZ: number,
   ): Float32Array {
-    if (typeof this.mod._scaleVertices === "function") {
+    const mod = this.mod;
+    if (mod && typeof mod._scaleVertices === "function") {
       return this.callWithHeapBuffers({
         vertices,
         outputFloatCount: 0,
         invoke: ({ inputPtr, elementCount }) => {
-          this.mod._scaleVertices(inputPtr, elementCount, scaleX, scaleY, scaleZ);
+          mod._scaleVertices(inputPtr, elementCount, scaleX, scaleY, scaleZ);
         },
         readResult: ({ inputPtr, elementCount, heapF32 }) =>
           heapF32.slice(inputPtr >> 2, (inputPtr >> 2) + elementCount),
@@ -206,42 +198,6 @@ export class WasmEngine {
     return scaled;
   }
 
-  private static injectScript(src: string): Promise<void> {
-    if (!WasmEngine.scriptPromise) {
-      WasmEngine.scriptPromise = new Promise((resolve, reject) => {
-        const existing = document.querySelector<HTMLScriptElement>(
-          `script[src="${src}"]`,
-        );
-        if (existing) {
-          if (existing.dataset.loaded === "true") {
-            resolve();
-            return;
-          }
-
-          existing.addEventListener("load", () => resolve(), { once: true });
-          existing.addEventListener(
-            "error",
-            () => reject(new Error(`[WasmEngine] Failed to load script: ${src}`)),
-            { once: true },
-          );
-          return;
-        }
-
-        const script = document.createElement("script");
-        script.src = src;
-        script.async = true;
-        script.onload = () => {
-          script.dataset.loaded = "true";
-          resolve();
-        };
-        script.onerror = () =>
-          reject(new Error(`[WasmEngine] Failed to load script: ${src}`));
-        document.head.appendChild(script);
-      });
-    }
-
-    return WasmEngine.scriptPromise;
-  }
 }
 
 interface HeapCallConfig<T> {

@@ -1,4 +1,5 @@
 /// <reference types="vite/client" />
+import "three-mesh-bvh";
 
 declare module "*.vue" {
   import type { DefineComponent } from "vue";

@@ -1,7 +1,9 @@
-import { computed, ref } from "vue";
-import type { BufferGeometry } from "three";
+import { computed, markRaw, ref, type Ref } from "vue";
+import { MeshStandardMaterial, type BufferGeometry } from "three";
 
 export type AssemblyVector3 = [number, number, number];
+export const defaultPartColor = "#3b82f6";
+export const selectedPartColor = "#60a5fa";
 
 let assemblyItemSequence = 0;
 
@@ -19,6 +21,7 @@ export interface AssemblyItem {
   name: string;
   sourcePath: string;
   geometry: BufferGeometry;
+  material: MeshStandardMaterial;
   position: AssemblyVector3;
   rotation: AssemblyVector3;
   visible: boolean;
@@ -29,9 +32,18 @@ export interface CreateAssemblyItemInput {
   name: string;
   sourcePath: string;
   geometry: BufferGeometry;
+  material?: MeshStandardMaterial;
   position?: AssemblyVector3;
   rotation?: AssemblyVector3;
   visible?: boolean;
+}
+
+function createAssemblyItemMaterial(): MeshStandardMaterial {
+  return markRaw(
+    new MeshStandardMaterial({
+      color: defaultPartColor,
+    }),
+  );
 }
 
 export function createAssemblyItem(
@@ -41,14 +53,15 @@ export function createAssemblyItem(
     id: input.id ?? createAssemblyItemId(),
     name: input.name,
     sourcePath: input.sourcePath,
-    geometry: input.geometry,
+    geometry: markRaw(input.geometry),
+    material: input.material ? markRaw(input.material) : createAssemblyItemMaterial(),
     position: input.position ?? [0, 0, 0],
     rotation: input.rotation ?? [0, 0, 0],
     visible: input.visible ?? true,
   };
 }
 
-export const assembly = ref<AssemblyItem[]>([]);
+export const assembly = ref<AssemblyItem[]>([]) as Ref<AssemblyItem[]>;
 export const selectedItemId = ref<string | null>(null);
 export const selectedAssemblyItem = computed<AssemblyItem | null>(() => {
   if (!selectedItemId.value) {

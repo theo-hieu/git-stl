@@ -28,16 +28,12 @@
         :key="item.id"
         :ref="(instance) => setMeshRef(item.id, instance)"
         :geometry="item.geometry"
+        :material="item.material"
         :position="item.position"
         :rotation="item.rotation"
         :visible="item.visible"
         @click="selectItem(item.id)"
-      >
-        <TresMeshStandardMaterial
-          :color="item.id === selectedItemId ? '#60a5fa' : '#3b82f6'"
-          :wireframe="isWireframe"
-        />
-      </TresMesh>
+      />
 
       <TransformControls
         v-if="selectedObject"
@@ -64,7 +60,9 @@ import {
   type AssemblyVector3,
   cameraPosition,
   controlsTarget,
+  defaultPartColor,
   isWireframe,
+  selectedPartColor,
   selectedItemId,
 } from "../store";
 
@@ -98,10 +96,31 @@ async function syncSelectedObject(): Promise<void> {
   }
 }
 
+function syncAssemblyMaterials(): void {
+  for (const item of assembly.value) {
+    item.material.color.set(
+      item.id === selectedItemId.value ? selectedPartColor : defaultPartColor,
+    );
+
+    if (item.material.wireframe !== isWireframe.value) {
+      item.material.wireframe = isWireframe.value;
+      item.material.needsUpdate = true;
+    }
+  }
+}
+
 watch(
   [selectedItemId, () => assembly.value.length],
   () => {
     void syncSelectedObject();
+  },
+  { immediate: true, flush: "post" },
+);
+
+watch(
+  [selectedItemId, isWireframe, () => assembly.value.length],
+  () => {
+    syncAssemblyMaterials();
   },
   { immediate: true, flush: "post" },
 );

@@ -3,6 +3,10 @@ export interface StlParserModule {
   _free(ptr: number): void;
   _getBinaryStlFloatCount(dataPtr: number, length: number): number;
   _parseBinaryStl(dataPtr: number, length: number): number;
+  _getParsedStlPositions(resultPtr: number): number;
+  _getParsedStlNormals(resultPtr: number): number;
+  _getParsedStlFloatCount(resultPtr: number): number;
+  _freeParsedStl(resultPtr: number): void;
   readonly HEAPU8: Uint8Array;
   readonly HEAPF32: Float32Array;
 }
@@ -20,6 +24,14 @@ type WasmExports = WebAssembly.Exports & {
   getBinaryStlFloatCount?: NumericFn;
   _parseBinaryStl?: NumericFn;
   parseBinaryStl?: NumericFn;
+  _getParsedStlPositions?: NumericFn;
+  getParsedStlPositions?: NumericFn;
+  _getParsedStlNormals?: NumericFn;
+  getParsedStlNormals?: NumericFn;
+  _getParsedStlFloatCount?: NumericFn;
+  getParsedStlFloatCount?: NumericFn;
+  _freeParsedStl?: NumericFn;
+  freeParsedStl?: NumericFn;
 };
 
 function getFunction(
@@ -88,6 +100,22 @@ export async function createStlParserModule(): Promise<StlParserModule> {
     "_parseBinaryStl",
     "parseBinaryStl",
   ]);
+  const getParsedStlPositions = getFunction(exports, [
+    "_getParsedStlPositions",
+    "getParsedStlPositions",
+  ]);
+  const getParsedStlNormals = getFunction(exports, [
+    "_getParsedStlNormals",
+    "getParsedStlNormals",
+  ]);
+  const getParsedStlFloatCount = getFunction(exports, [
+    "_getParsedStlFloatCount",
+    "getParsedStlFloatCount",
+  ]);
+  const freeParsedStl = getFunction(exports, [
+    "_freeParsedStl",
+    "freeParsedStl",
+  ]);
 
   return {
     _malloc(bytes: number) {
@@ -110,6 +138,23 @@ export async function createStlParserModule(): Promise<StlParserModule> {
       const ptr = parseBinaryStl(dataPtr, length);
       refreshViews();
       return ptr;
+    },
+    _getParsedStlPositions(resultPtr: number) {
+      refreshViews();
+      return getParsedStlPositions(resultPtr);
+    },
+    _getParsedStlNormals(resultPtr: number) {
+      refreshViews();
+      return getParsedStlNormals(resultPtr);
+    },
+    _getParsedStlFloatCount(resultPtr: number) {
+      refreshViews();
+      return getParsedStlFloatCount(resultPtr);
+    },
+    _freeParsedStl(resultPtr: number) {
+      refreshViews();
+      freeParsedStl(resultPtr);
+      refreshViews();
     },
     get HEAPU8() {
       refreshViews();

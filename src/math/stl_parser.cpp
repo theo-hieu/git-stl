@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 #include <limits>
 
 namespace {
@@ -20,6 +21,19 @@ constexpr std::uint32_t kVerticesPerTriangle = 3;
 constexpr std::uint32_t kFloatsPerVertex = 3;
 constexpr std::uint32_t kFloatsPerTriangle =
     kVerticesPerTriangle * kFloatsPerVertex;
+constexpr float kNormalEpsilon = 1.0e-12f;
+
+struct Vec3 {
+  float x;
+  float y;
+  float z;
+};
+
+struct ParsedStlBuffers {
+  float *positions;
+  float *normals;
+  int floatCount;
+};
 
 std::uint32_t readU32LE(const std::uint8_t *src) {
   return static_cast<std::uint32_t>(src[0]) |
@@ -129,6 +143,26 @@ int computeFloatCount(const std::uint8_t *data, int length) {
   return static_cast<int>(floatCount);
 }
 
+Vec3 normalizeOrFallback(const Vec3 &candidate, const Vec3 &fallback) {
+  const float candidateLengthSquared =
+      candidate.x * candidate.x + candidate.y * candidate.y + candidate.z * candidate.z;
+  if (candidateLengthSquared > kNormalEpsilon) {
+    const float inverseLength = 1.0f / std::sqrt(candidateLengthSquared);
+    return {candidate.x * inverseLength, candidate.y * inverseLength,
+            candidate.z * inverseLength};
+  }
+
+  const float fallbackLengthSquared =
+      fallback.x * fallback.x + fallback.y * fallback.y + fallback.z * fallback.z;
+  if (fallbackLengthSquared > kNormalEpsilon) {
+    const float inverseLength = 1.0f / std::sqrt(fallbackLengthSquared);
+    return {fallback.x * inverseLength, fallback.y * inverseLength,
+            fallback.z * inverseLength};
+  }
+
+  return {0.0f, 0.0f, 0.0f};
+}
+
 } // namespace
 
 extern "C" {
@@ -137,37 +171,118 @@ int getBinaryStlFloatCount(const std::uint8_t *data, int length) {
   return computeFloatCount(data, length);
 }
 
-float *parseBinaryStl(const std::uint8_t *data, int length) {
+ParsedStlBuffers *parseBinaryStl(const std::uint8_t *data, int length) {
   const int floatCount = computeFloatCount(data, length);
   if (floatCount <= 0) {
     return nullptr;
   }
 
-  auto *out = static_cast<float *>(
+  auto *positions = static_cast<float *>(
       std::malloc(static_cast<std::size_t>(floatCount) * sizeof(float)));
-  if (out == nullptr) {
+  if (positions == nullptr) {
     return nullptr;
   }
+
+  auto *normals = static_cast<float *>(
+      std::malloc(static_cast<std::size_t>(floatCount) * sizeof(float)));
+  if (normals == nullptr) {
+    std::free(positions);
+    return nullptr;
+  }
+
+  auto *result = static_cast<ParsedStlBuffers *>(std::malloc(sizeof(ParsedStlBuffers)));
+  if (result == nullptr) {
+    std::free(normals);
+    std::free(positions);
+    return nullptr;
+  }
+
+  result->positions = positions;
+  result->normals = normals;
+  result->floatCount = floatCount;
 
   const int triangleCount = floatCount / static_cast<int>(kFloatsPerTriangle);
   const std::uint8_t *cursor = data + kBinaryStlPreambleBytes;
   int outIndex = 0;
 
   for (int triangleIndex = 0; triangleIndex < triangleCount; ++triangleIndex) {
+    const Vec3 stlNormal = {
+        readF32LE(cursor),
+        readF32LE(cursor + 4),
+        readF32LE(cursor + 8),
+    };
     cursor += kNormalBytes;
+
+    Vec3 vertices[kVerticesPerTriangle];
 
     for (std::uint32_t vertexIndex = 0; vertexIndex < kVerticesPerTriangle;
          ++vertexIndex) {
-      out[outIndex++] = readF32LE(cursor);
-      out[outIndex++] = readF32LE(cursor + 4);
-      out[outIndex++] = readF32LE(cursor + 8);
+      const Vec3 vertex = {
+          readF32LE(cursor),
+          readF32LE(cursor + 4),
+          readF32LE(cursor + 8),
+      };
+      vertices[vertexIndex] = vertex;
+
+      positions[outIndex++] = vertex.x;
+      positions[outIndex++] = vertex.y;
+      positions[outIndex++] = vertex.z;
       cursor += kVertexBytes;
+    }
+
+    const Vec3 edgeAB = {
+        vertices[1].x - vertices[0].x,
+        vertices[1].y - vertices[0].y,
+        vertices[1].z - vertices[0].z,
+    };
+    const Vec3 edgeAC = {
+        vertices[2].x - vertices[0].x,
+        vertices[2].y - vertices[0].y,
+        vertices[2].z - vertices[0].z,
+    };
+    const Vec3 computedNormal = {
+        edgeAB.y * edgeAC.z - edgeAB.z * edgeAC.y,
+        edgeAB.z * edgeAC.x - edgeAB.x * edgeAC.z,
+        edgeAB.x * edgeAC.y - edgeAB.y * edgeAC.x,
+    };
+    const Vec3 normal = normalizeOrFallback(stlNormal, computedNormal);
+
+    const int normalIndex = outIndex - static_cast<int>(kFloatsPerTriangle);
+    for (std::uint32_t vertexIndex = 0; vertexIndex < kVerticesPerTriangle;
+         ++vertexIndex) {
+      const int baseIndex =
+          normalIndex + static_cast<int>(vertexIndex * kFloatsPerVertex);
+      normals[baseIndex] = normal.x;
+      normals[baseIndex + 1] = normal.y;
+      normals[baseIndex + 2] = normal.z;
     }
 
     cursor += kAttributeBytes;
   }
 
-  return out;
+  return result;
+}
+
+float *getParsedStlPositions(const ParsedStlBuffers *result) {
+  return result == nullptr ? nullptr : result->positions;
+}
+
+float *getParsedStlNormals(const ParsedStlBuffers *result) {
+  return result == nullptr ? nullptr : result->normals;
+}
+
+int getParsedStlFloatCount(const ParsedStlBuffers *result) {
+  return result == nullptr ? 0 : result->floatCount;
+}
+
+void freeParsedStl(ParsedStlBuffers *result) {
+  if (result == nullptr) {
+    return;
+  }
+
+  std::free(result->positions);
+  std::free(result->normals);
+  std::free(result);
 }
 
 } // extern "C"

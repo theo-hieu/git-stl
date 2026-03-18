@@ -3,22 +3,20 @@ import {
   exists,
   mkdir,
   readDir,
-  readFile,
   readTextFile,
   remove,
+  writeFile,
   writeTextFile,
 } from "@tauri-apps/plugin-fs";
 import { Command } from "@tauri-apps/plugin-shell";
 import { Mesh, MeshStandardMaterial } from "three";
 import { STLExporter } from "three/examples/jsm/exporters/STLExporter.js";
-import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
 import { computed, ref, watch } from "vue";
 import { useStlImport } from "./useStlImport";
 import {
   activeMeshName,
   activeProjectName,
   assembly,
-  createAssemblyItem,
   selectedItemId,
   type AssemblyItem,
   type AssemblyVector3,
@@ -129,16 +127,31 @@ function parseManifest(raw: string): AssemblyManifest {
   };
 }
 
-function exportAssemblyItem(item: AssemblyItem): string {
-  const exporter = new STLExporter();
-  const mesh = new Mesh(item.geometry, new MeshStandardMaterial());
-  const exportResult = exporter.parse(mesh, { binary: false });
+function getPathKey(path: string): string {
+  return path.replace(/\\/g, "/").toLowerCase();
+}
 
-  if (typeof exportResult !== "string") {
-    throw new Error(`Expected text STL export for "${item.name}".`);
+function exportAssemblyItem(item: AssemblyItem): Uint8Array {
+  const exporter = new STLExporter();
+  const material = new MeshStandardMaterial();
+  const mesh = new Mesh(item.geometry, material);
+  const exportResult = (() => {
+    try {
+      return exporter.parse(mesh, { binary: true });
+    } finally {
+      material.dispose();
+    }
+  })();
+
+  if (!(exportResult instanceof DataView)) {
+    throw new Error(`Expected binary STL export for "${item.name}".`);
   }
 
-  return exportResult;
+  return new Uint8Array(
+    exportResult.buffer,
+    exportResult.byteOffset,
+    exportResult.byteLength,
+  );
 }
 
 function buildManifest(projectName: string): AssemblyManifest {
@@ -248,42 +261,51 @@ async function syncProjectFiles(
     }
 
     const filePath = await join(partsDir, manifestItem.fileName);
-    await writeTextFile(filePath, exportAssemblyItem(sourceItem));
+    await writeFile(filePath, exportAssemblyItem(sourceItem));
   }
 
   const manifestPath = await join(projectDir, MANIFEST_FILE_NAME);
   await writeTextFile(manifestPath, JSON.stringify(manifest, null, 2));
 }
 
-async function loadManifestAssemblyItem(
-  projectDir: string,
-  manifestItem: AssemblyManifestItem,
-): Promise<AssemblyItem> {
-  const filePath = await join(projectDir, PARTS_DIRECTORY_NAME, manifestItem.fileName);
-  const fileContents = await readFile(filePath);
-  const buffer = fileContents.buffer.slice(
-    fileContents.byteOffset,
-    fileContents.byteOffset + fileContents.byteLength,
+async function getManifestFilePaths(manifest: AssemblyManifest, projectDir: string) {
+  return Promise.all(
+    manifest.items.map((item) => join(projectDir, PARTS_DIRECTORY_NAME, item.fileName)),
   );
+}
 
-  const loader = new STLLoader();
-  const geometry = loader.parse(buffer);
-  geometry.computeBoundingBox();
-  geometry.computeBoundingSphere();
+async function applyManifestToRestoredItems(
+  manifest: AssemblyManifest,
+  projectDir: string,
+  restoredItems: AssemblyItem[],
+): Promise<AssemblyItem[]> {
+  const itemsBySourcePath = new Map(
+    restoredItems.map((item) => [getPathKey(item.sourcePath), item]),
+  );
+  const orderedItems: AssemblyItem[] = [];
 
-  return createAssemblyItem({
-    id: manifestItem.id,
-    name: manifestItem.name,
-    sourcePath: filePath,
-    geometry,
-    position: [...manifestItem.position] as AssemblyVector3,
-    rotation: [...manifestItem.rotation] as AssemblyVector3,
-    visible: manifestItem.visible,
-  });
+  for (const manifestItem of manifest.items) {
+    const filePath = await join(projectDir, PARTS_DIRECTORY_NAME, manifestItem.fileName);
+    const restoredItem = itemsBySourcePath.get(getPathKey(filePath));
+
+    if (!restoredItem) {
+      console.warn(`Restored manifest item "${manifestItem.name}" was not loaded.`);
+      continue;
+    }
+
+    restoredItem.id = manifestItem.id;
+    restoredItem.name = manifestItem.name;
+    restoredItem.position = [...manifestItem.position] as AssemblyVector3;
+    restoredItem.rotation = [...manifestItem.rotation] as AssemblyVector3;
+    restoredItem.visible = manifestItem.visible;
+    orderedItems.push(restoredItem);
+  }
+
+  return orderedItems;
 }
 
 export function useVersioning() {
-  const { frameAssembly, releaseAssemblyItemGeometry } = useStlImport();
+  const { clearAssembly, frameAssembly, processStlFiles } = useStlImport();
 
   const versionTargetName = computed(
     () =>
@@ -348,13 +370,20 @@ export function useVersioning() {
 
       const manifestPath = await join(projectDir, MANIFEST_FILE_NAME);
       const manifest = parseManifest(await readTextFile(manifestPath));
-      const restoredItems = await Promise.all(
-        manifest.items.map((item) => loadManifestAssemblyItem(projectDir, item)),
-      );
+      const restoredPaths = await getManifestFilePaths(manifest, projectDir);
 
-      for (const existingItem of assembly.value) {
-        releaseAssemblyItemGeometry(existingItem);
-      }
+      clearAssembly();
+
+      // Wait for the worker batch to fully materialize geometry before restoring
+      // manifest-authored ids, transforms, and visibility state.
+      const workerLoadedItems = await processStlFiles(restoredPaths, {
+        frameOnComplete: false,
+      });
+      const restoredItems = await applyManifestToRestoredItems(
+        manifest,
+        projectDir,
+        workerLoadedItems,
+      );
 
       assembly.value = restoredItems;
       activeProjectName.value = manifest.projectName;

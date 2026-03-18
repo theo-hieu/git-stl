@@ -1,3 +1,5 @@
+import { BufferAttribute, BufferGeometry } from "three";
+import { MeshBVH, type SerializedBVH } from "three-mesh-bvh";
 import type { StlParserModule } from "./stlParserModule";
 
 const ASCII_STL_FLOAT_COUNT = -2;
@@ -17,6 +19,8 @@ class StlParserError extends Error {
 interface StlWorkerSuccess {
   id: number;
   positions: Float32Array;
+  normals: Float32Array;
+  serializedBVH: SerializedBVH;
 }
 
 interface StlWorkerFailure {
@@ -33,6 +37,27 @@ async function getParserModule(): Promise<StlParserModule> {
   }
 
   return modulePromise;
+}
+
+function getTransferablesForGeometryPayload(
+  positions: Float32Array,
+  normals: Float32Array,
+  serializedBVH: SerializedBVH,
+): Transferable[] {
+  const transferables: Transferable[] = [
+    positions.buffer,
+    normals.buffer,
+    ...serializedBVH.roots,
+  ];
+
+  if (serializedBVH.index) {
+    transferables.push(serializedBVH.index.buffer);
+  }
+
+  return transferables.filter(
+    (value): value is Transferable =>
+      !(typeof SharedArrayBuffer !== "undefined" && value instanceof SharedArrayBuffer),
+  );
 }
 
 function lowerAscii(byte: number): string {
@@ -73,7 +98,10 @@ function looksLikeAsciiStl(buffer: ArrayBuffer): boolean {
   return /facet\s+normal/i.test(headerText);
 }
 
-function parseBinaryStl(mod: StlParserModule, buffer: ArrayBuffer): Float32Array {
+function parseBinaryStl(
+  mod: StlParserModule,
+  buffer: ArrayBuffer,
+): { positions: Float32Array; normals: Float32Array } {
   if (looksLikeAsciiStl(buffer)) {
     throw new StlParserError(
       "ASCII STL detected. Import a binary STL or add an ASCII parser path.",
@@ -87,7 +115,7 @@ function parseBinaryStl(mod: StlParserModule, buffer: ArrayBuffer): Float32Array
     throw new Error("Failed to allocate Wasm input buffer.");
   }
 
-  let outputPtr = 0;
+  let resultPtr = 0;
 
   try {
     mod.HEAPU8.set(bytes, inputPtr);
@@ -105,19 +133,39 @@ function parseBinaryStl(mod: StlParserModule, buffer: ArrayBuffer): Float32Array
     }
 
     if (floatCount === 0) {
-      return new Float32Array();
+      return {
+        positions: new Float32Array(),
+        normals: new Float32Array(),
+      };
     }
 
-    outputPtr = mod._parseBinaryStl(inputPtr, bytes.byteLength);
-    if (outputPtr === 0) {
-      throw new Error("Wasm STL parser failed to allocate output vertices.");
+    resultPtr = mod._parseBinaryStl(inputPtr, bytes.byteLength);
+    if (resultPtr === 0) {
+      throw new Error("Wasm STL parser failed to allocate output buffers.");
     }
 
-    const start = outputPtr >> 2;
-    return mod.HEAPF32.slice(start, start + floatCount);
+    const outputFloatCount = mod._getParsedStlFloatCount(resultPtr);
+    const positionsPtr = mod._getParsedStlPositions(resultPtr);
+    const normalsPtr = mod._getParsedStlNormals(resultPtr);
+
+    if (outputFloatCount !== floatCount) {
+      throw new Error("Wasm STL parser returned an unexpected output size.");
+    }
+
+    if (positionsPtr === 0 || normalsPtr === 0) {
+      throw new Error("Wasm STL parser returned incomplete output buffers.");
+    }
+
+    const positionsStart = positionsPtr >> 2;
+    const normalsStart = normalsPtr >> 2;
+
+    return {
+      positions: mod.HEAPF32.slice(positionsStart, positionsStart + floatCount),
+      normals: mod.HEAPF32.slice(normalsStart, normalsStart + floatCount),
+    };
   } finally {
-    if (outputPtr !== 0) {
-      mod._free(outputPtr);
+    if (resultPtr !== 0) {
+      mod._freeParsedStl(resultPtr);
     }
 
     mod._free(inputPtr);
@@ -131,10 +179,20 @@ self.onmessage = async (
 
   try {
     const mod = await getParserModule();
-    const positions = parseBinaryStl(mod, buffer);
-    const response: StlWorkerSuccess = { id, positions };
+    const { positions, normals } = parseBinaryStl(mod, buffer);
+    const workerGeometry = new BufferGeometry();
+    workerGeometry.setAttribute("position", new BufferAttribute(positions, 3));
 
-    (self as DedicatedWorkerGlobalScope).postMessage(response, [positions.buffer]);
+    // MeshBVH generation is eager in the installed library version, so construction
+    // here performs the full spatial index build off the main thread.
+    const bvh = new MeshBVH(workerGeometry);
+    const serializedBVH = MeshBVH.serialize(bvh);
+    const response: StlWorkerSuccess = { id, positions, normals, serializedBVH };
+
+    (self as DedicatedWorkerGlobalScope).postMessage(
+      response,
+      getTransferablesForGeometryPayload(positions, normals, serializedBVH),
+    );
   } catch (error) {
     const failure: StlWorkerFailure =
       error instanceof StlParserError
