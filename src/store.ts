@@ -24,7 +24,9 @@ export interface AssemblyItem {
   material: MeshStandardMaterial;
   position: AssemblyVector3;
   rotation: AssemblyVector3;
+  scale: AssemblyVector3;
   visible: boolean;
+  geometryModified: boolean;
 }
 
 export interface CreateAssemblyItemInput {
@@ -35,7 +37,9 @@ export interface CreateAssemblyItemInput {
   material?: MeshStandardMaterial;
   position?: AssemblyVector3;
   rotation?: AssemblyVector3;
+  scale?: AssemblyVector3;
   visible?: boolean;
+  geometryModified?: boolean;
 }
 
 function createAssemblyItemMaterial(): MeshStandardMaterial {
@@ -57,7 +61,9 @@ export function createAssemblyItem(
     material: input.material ? markRaw(input.material) : createAssemblyItemMaterial(),
     position: input.position ?? [0, 0, 0],
     rotation: input.rotation ?? [0, 0, 0],
+    scale: input.scale ?? [1, 1, 1],
     visible: input.visible ?? true,
+    geometryModified: input.geometryModified ?? false,
   };
 }
 
@@ -72,6 +78,9 @@ export const selectedAssemblyItem = computed<AssemblyItem | null>(() => {
 });
 
 export const activeProjectName = ref<string | null>(null);
+export const isProjectMode = computed(
+  () => Boolean(activeProjectName.value && activeProjectName.value.trim().length > 0),
+);
 export const activeMeshName = ref<string | null>(null);
 export const isWireframe = ref(false);
 export const scaleX = ref(1);

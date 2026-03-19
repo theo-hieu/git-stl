@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-This project is a desktop STL assembly viewer built with Vue, Three.js, and Tauri. Its main purpose is to let a user import one or more STL files, inspect them together as a simple assembly, adjust visibility and placement, apply geometry scaling, and save versioned snapshots of an active part using Git-backed history stored in the app data directory.
+This project is a desktop STL assembly viewer built with Vue, Three.js, and Tauri. Its main purpose is to let a user import one or more STL files, inspect them together as a simple assembly, adjust visibility and placement, apply geometry scaling, and save full-assembly snapshots into isolated Git-backed project folders under the app data directory.
 
 The product value is in combining a lightweight desktop UI with local-native file access, fast WebAssembly-based STL parsing, worker-generated BVH acceleration for high-poly meshes, and simple revision tracking for mesh edits without requiring a remote backend.
 
@@ -21,9 +21,9 @@ Architecturally, the app is a small component-based desktop client with a few cl
 - Shared reactive state: `src/store.ts` exposes app-wide Vue refs instead of using Pinia/Vuex.
 - Import pipeline: `useStlImport.ts` reads STL bytes through Tauri, coordinates a worker queue, reconstructs raw Three.js `BufferGeometry` instances, and attaches worker-generated BVH data for fast raycasting.
 - Rendering pipeline: the scene reacts directly to the shared assembly state while keeping heavyweight Three.js objects out of Vue's deep proxy system via `markRaw()`.
-- Persistence/versioning pipeline: the full assembly is exported as per-part STL files plus a manifest under Tauri app data and versioned with local Git commands.
+- Persistence/versioning pipeline: the full assembly is represented by a `manifest.json` plus referenced STL files under Tauri app data and versioned per project with Git repositories managed through native Tauri commands.
 
-The Rust/Tauri layer currently acts mostly as a plugin host and application container. Almost all domain logic lives in the frontend TypeScript layer.
+The Rust/Tauri layer now owns Git repository orchestration and commit/diff history commands, while the frontend TypeScript layer still owns most scene, import, and manifest serialization logic.
 
 ## Core Capabilities & Features
 
@@ -39,8 +39,9 @@ The Rust/Tauri layer currently acts mostly as a plugin host and application cont
 - Automatically frame the camera around the loaded assembly after import completes.
 - Apply assembly-wide XYZ scaling using a separate Wasm geometry module.
 - Extract raw vertex data from geometry for future Wasm/debug workflows.
-- Save versions of the current assembly into an app-data project folder backed by Git commits.
+- Save versions of the current assembly into an isolated app-data project folder backed by Git commits.
 - Read Git history for the current project and restore a saved revision into the scene.
+- Avoid rewriting STL files on routine saves unless a part's geometry was actually modified.
 
 Important current constraints:
 
@@ -48,7 +49,7 @@ Important current constraints:
 - Three.js `BufferGeometry` and `MeshStandardMaterial` instances stored alongside assembly items must stay raw and must be explicitly disposed when removed or replaced.
 - Imported STL geometries arrive with a worker-generated serialized BVH that is deserialized on the main thread and assigned to `geometry.boundsTree`; disposal must also clear the BVH via `disposeBoundsTree()`.
 - The scaling path depends on `public/geometry.wasm`; that artifact is produced by the Wasm build scripts and does not appear in the current tracked file list.
-- Native Rust commands are minimal; the included `greet` command is template scaffolding and is not part of the main workflow.
+- Version commits are created through `git2` on the Rust side, while checkout still uses the shell plugin to restore a selected tree into the working directory.
 
 ## Key File Structure & Modules
 
@@ -70,8 +71,8 @@ Important current constraints:
 
 ### UI Components
 
-- `src/components/Sidebar.vue`: primary control surface. Handles import triggers, version save/history, assembly transform controls, removal, and debug/Wasm actions.
-- `src/components/Scene.vue`: renders camera, controls, lights, and one mesh per loaded assembly item, binding each part's raw material directly. Current interaction is selection-on-click only; there are no per-mesh pointer-move or pointer-over handlers in the scene template.
+- `src/components/Sidebar.vue`: primary control surface. Handles import triggers, version save/history, assembly transform controls, removal, and debug/Wasm actions. It also reflects version-save loading state.
+- `src/components/Scene.vue`: renders camera, controls, lights, and one mesh per loaded assembly item, binding each part's raw material directly. It applies stored `position`, `rotation`, and `scale` from assembly state and exposes transform controls for translate/rotate edits.
 - `src/components/AnimatedBox.vue`: empty-state visual shown when no STL data is loaded.
 
 ### Geometry / Wasm
@@ -90,8 +91,8 @@ Important current constraints:
 ### Composables / Services
 
 - `src/composables/useStlImport.ts`: owns file queueing, worker coordination, BVH deserialization, geometry caching, camera framing, selection updates, and assembly resource disposal.
-- `src/composables/useAssemblyTools.ts`: owns Wasm-based assembly scaling and vertex extraction helpers.
-- `src/composables/useVersioning.ts`: owns manifest generation, STL export/import, Git history reads, and assembly restore flows. Restored STL files are currently reparsed with Three.js `STLLoader` and have their BVH computed on the main thread.
+- `src/composables/useAssemblyTools.ts`: owns Wasm-based assembly scaling and vertex extraction helpers. Assembly-wide scaling also marks parts as geometry-dirty so version saves know when binary STL output must be regenerated.
+- `src/composables/useVersioning.ts`: owns manifest generation, selective STL materialization, Git history reads, and assembly restore flows. Restore reuses the worker-based STL import path and then reapplies manifest-authored ids, transforms, visibility, and scale.
 
 ### Static/Public Assets
 
@@ -101,7 +102,7 @@ Important current constraints:
 ### Tauri Shell
 
 - `src-tauri/src/main.rs`: native entry point.
-- `src-tauri/src/lib.rs`: Tauri builder, plugin registration, and template `greet` command.
+- `src-tauri/src/lib.rs`: Tauri builder, plugin registration, `git2`-backed commit orchestration, and native Git history/diff/blob-reading commands.
 - `src-tauri/tauri.conf.json`: app metadata, build hooks, bundle settings, and window configuration.
 - `src-tauri/capabilities/default.json`: permissions, including app-data filesystem access and `git` execution through the shell plugin.
 - `src-tauri/Cargo.toml`: Rust dependencies and plugin declarations.
@@ -112,7 +113,7 @@ The app uses module-level Vue refs in `src/store.ts` as its shared state layer. 
 
 Primary state objects:
 
-- `assembly`: array of loaded parts, each containing display name, source path, raw `BufferGeometry`, raw `MeshStandardMaterial`, position, rotation, and visibility.
+- `assembly`: array of loaded parts, each containing display name, source path, raw `BufferGeometry`, raw `MeshStandardMaterial`, position, rotation, scale, visibility, and a `geometryModified` flag.
 - `selectedItemId`: current selection in both the sidebar and scene transform controls.
 - `activeProjectName`: project/versioning root name, typically derived from the first imported STL.
 - `activeMeshName`: filename of the most recently imported or restored mesh, used for UI display.
@@ -149,24 +150,25 @@ The import path also keeps a geometry cache keyed by source path so repeated imp
 2. `useAssemblyTools.ts` creates a `WasmEngine`.
 3. `WasmEngine` loads `geometry.wasm` through `geometryModule.ts`.
 4. Each mesh position buffer is copied into Wasm memory, scaled in C++, copied back, and written into the existing Three.js attribute array.
-5. The geometry is marked dirty and normals are recomputed.
+5. The geometry is marked dirty, normals are recomputed, and the owning assembly items are flagged as `geometryModified` for the next version save.
 
 This is an in-memory mutation path; the transformed mesh is not automatically persisted unless the user saves a version afterward.
 
 ### Versioning / Persistence Flow
 
-1. The current assembly is converted into a manifest plus one STL file per part.
-2. Those files are written to `appDataDir()/STL_Viewer_Projects/<project-name>/`.
-3. The app initializes a Git repository there if needed, configures a local identity, stages the files, and creates a commit.
-4. The Git log is read back through the Tauri shell plugin and shown in the sidebar.
-5. On checkout, the selected historical manifest and STL files are restored from Git, re-read from disk, parsed with Three.js `STLLoader`, and used to rebuild the in-memory assembly.
-6. The restore path currently computes a fresh BVH on the main thread for the `STLLoader` geometry rather than reusing the worker-based import path.
-7. Before replacing the live assembly, existing raw geometries and materials are explicitly disposed to avoid leaking WebGL resources.
+1. The current assembly is serialized into a lightweight `manifest.json` containing each part's stable id, file name, visibility, and `position` / `rotation` / `scale`.
+2. Project files live under `appDataDir()/STL_Viewer_Projects/<project-name>/`, with STL binaries stored in `parts/`.
+3. On save, `manifest.json` is always rewritten, but STL files are only written when the corresponding part is missing from the project folder or its `geometryModified` flag is set.
+4. The frontend invokes the native `commit_assembly` Tauri command with the project name and commit message.
+5. Rust resolves the isolated project directory, initializes or opens the per-project repository with `git2`, stages the working tree, writes the index tree, and creates a commit with a generic local signature.
+6. Git history, commit diffs, and blob reads are served by native Tauri commands and shown in the sidebar.
+7. On checkout, the selected revision is restored into the project working tree, the manifest is read from disk, and the referenced STL files are reparsed through the worker-based import pipeline before manifest state is reapplied.
+8. Before replacing the live assembly, existing raw geometries and materials are explicitly disposed to avoid leaking WebGL resources.
 
 State persistence is therefore split into two layers:
 
 - Session state: Vue refs in memory only.
-- Saved mesh history: STL files plus Git metadata under the Tauri app-data directory.
+- Saved mesh history: per-project manifests, STL files, and Git metadata under the Tauri app-data directory.
 
 ## Extension Points
 
@@ -184,6 +186,6 @@ State persistence is therefore split into two layers:
 - The codebase has already started moving core workflows out of `Sidebar.vue` into composables, but the UI still coordinates many flows and remains an integration-heavy surface.
 - The current shared state model is simple and easy to follow, but it has no undo/redo and no persisted workspace state between launches.
 - Because Three.js scene payloads are intentionally marked raw to avoid Vue proxy overhead, any future code that stores meshes, materials, or geometries in shared state must also take responsibility for manual disposal.
-- The most performance-sensitive import hotspot, BVH generation for high-poly STL meshes, has been moved into the worker import path; however, version restore still rebuilds BVHs on the main thread.
+- The most performance-sensitive import hotspot, BVH generation for high-poly STL meshes, stays in the worker import path, and version restore now reuses that same path instead of introducing a separate main-thread parser.
 - The project already has a strong path for adding more Wasm-powered geometry operations, and that appears to be a deliberate architectural direction.
-- Because Git execution is permissioned through Tauri shell capabilities, versioning features are tightly coupled to desktop packaging and app-data filesystem access rather than a pure web deployment model.
+- Versioning is now split between native `git2` commands for commit/history/diff access and the shell plugin for checkout, so Git-related behavior is tightly coupled to desktop packaging and app-data filesystem access rather than a pure web deployment model.

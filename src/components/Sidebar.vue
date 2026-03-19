@@ -1,11 +1,21 @@
 <template>
   <div class="sidebar">
-    <h2>Tools</h2>
-    <p>STL Viewer</p>
+    <h2>{{ sessionTitle }}</h2>
+    <p>{{ sessionModeLabel }}</p>
 
-    <button @click="openFiles" class="action-btn" :disabled="isImporting">
-      {{ isImporting ? "Importing..." : "Import Assembly (Multi-Select)" }}
-    </button>
+    <div class="primary-actions">
+      <button @click="openFiles" class="action-btn" :disabled="isImporting || isLoadingProject">
+        {{ isImporting ? "Importing..." : "Import Assembly (Multi-Select)" }}
+      </button>
+
+      <button
+        @click="openProjectBrowser"
+        class="action-btn browse-btn"
+        :disabled="isImporting || isLoadingProject"
+      >
+        {{ isLoadingProject ? "Opening Project..." : "Open Project" }}
+      </button>
+    </div>
 
     <div v-if="isImporting" class="progress-container">
       <progress :max="totalFilesToLoad" :value="filesLoaded"></progress>
@@ -24,18 +34,61 @@
 
       <p>
         <strong>{{ assembly.length }} mesh(es) loaded</strong><br />
-        <span class="dim">Project: {{ activeProjectName ?? "None" }}</span><br />
+        <span class="dim">Project: {{ displayedProjectName }}</span><br />
+        <span class="dim">Mode: {{ sessionModeLabel }}</span><br />
         <span class="dim">Last Imported: {{ activeMeshName ?? "None" }}</span><br />
         <span class="dim">Selected Part: {{ selectedPartName ?? "None" }}</span>
       </p>
 
-      <button
-        @click="saveVersion"
-        class="action-btn save-btn"
-        :disabled="!versionTargetName"
-      >
-        Save Project Version
-      </button>
+      <div class="versioning-section">
+        <h3>Versioning</h3>
+
+        <template v-if="isProjectMode">
+          <label class="text-field">
+            <span class="field-label">Commit Message</span>
+            <input
+              v-model="commitMessage"
+              type="text"
+              class="text-input"
+              placeholder="Describe this assembly change"
+            />
+          </label>
+
+          <button
+            @click="handleSaveVersion"
+            class="action-btn save-btn"
+            :disabled="isSavingVersion"
+          >
+            {{ isSavingVersion ? "Saving Version..." : "Save Version" }}
+          </button>
+        </template>
+
+        <template v-else>
+          <p class="dim">
+            Version history unlocks after this session is saved into its own project
+            directory.
+          </p>
+
+          <label class="text-field">
+            <span class="field-label">Project Name</span>
+            <input
+              v-model="newProjectName"
+              type="text"
+              class="text-input"
+              placeholder="Enter a project name"
+            />
+          </label>
+
+          <button
+            @click="handleSaveAsNewProject"
+            class="action-btn save-btn"
+            :disabled="newProjectName.trim().length === 0 || isSavingVersion"
+          >
+            {{ isSavingVersion ? "Saving Project..." : "Save as New Project" }}
+          </button>
+        </template>
+      </div>
+
       <button
         @click="prepareWasm"
         class="action-btn wasm-btn"
@@ -140,17 +193,148 @@
         </ul>
       </div>
 
-      <div v-if="commitHistory.length > 0" class="history-section">
+      <div v-if="isProjectMode" class="history-section">
         <h3>Version History</h3>
         <p class="dim" v-if="versionTargetName">Project: {{ versionTargetName }}</p>
+        <p v-if="commitHistory.length === 0" class="dim empty-history">
+          No commits yet for this project.
+        </p>
+
+        <div v-if="commitHistory.length > 1" class="diff-section">
+          <div class="diff-header">
+            <h3>Diff Mode</h3>
+            <label class="diff-toggle">
+              <input
+                type="checkbox"
+                :checked="isDiffMode"
+                :disabled="!canEnableDiff"
+                @change="toggleDiffMode"
+              />
+              Compare Commits
+            </label>
+          </div>
+
+          <div class="diff-selects">
+            <label>
+              Base
+              <select
+                v-model="selectedBaseSha"
+                :disabled="!isDiffMode || isLoadingDiff"
+              >
+                <option
+                  v-for="commit in commitHistory"
+                  :key="`base-${commit.sha}`"
+                  :value="commit.sha"
+                >
+                  {{ commit.label }}
+                </option>
+              </select>
+            </label>
+
+            <label>
+              Head
+              <select
+                v-model="selectedHeadSha"
+                :disabled="!isDiffMode || isLoadingDiff"
+              >
+                <option
+                  v-for="commit in commitHistory"
+                  :key="`head-${commit.sha}`"
+                  :value="commit.sha"
+                >
+                  {{ commit.label }}
+                </option>
+              </select>
+            </label>
+          </div>
+
+          <div v-if="isDiffMode" class="diff-visualization">
+            <div class="diff-mode-buttons" role="group" aria-label="Diff visualization mode">
+              <button
+                type="button"
+                class="diff-mode-btn"
+                :class="{ active: diffVisualizationMode === 'overlay' }"
+                @click="diffVisualizationMode = 'overlay'"
+              >
+                Overlay
+              </button>
+              <button
+                type="button"
+                class="diff-mode-btn"
+                :class="{ active: diffVisualizationMode === 'split' }"
+                @click="diffVisualizationMode = 'split'"
+              >
+                Split
+              </button>
+            </div>
+
+            <label
+              v-if="diffVisualizationMode === 'overlay'"
+              class="diff-opacity-control"
+            >
+              <span>Diff Opacity</span>
+              <input
+                v-model.number="diffOpacity"
+                type="range"
+                min="0"
+                max="1"
+                step="0.01"
+              />
+              <div class="diff-opacity-labels">
+                <span class="base-swatch">Base {{ baseOpacityPercent }}%</span>
+                <span class="head-swatch">Head {{ headOpacityPercent }}%</span>
+              </div>
+            </label>
+          </div>
+
+          <p class="dim">Red shows the base commit and green shows the head commit.</p>
+          <p v-if="isDiffMode && !canCompareSelectedCommits" class="diff-warning">
+            Pick two different commits to render the mesh diff.
+          </p>
+          <p v-else-if="isLoadingDiff" class="dim">Building diff overlay...</p>
+          <p v-else-if="diffError" class="diff-error">{{ diffError }}</p>
+          <p v-else-if="isDiffMode && diffResult" class="dim">
+            {{ diffFiles.length }} changed file(s),
+            {{ diffManifestEntries.length }} manifest delta(s).
+          </p>
+
+          <ul v-if="isDiffMode && diffFiles.length > 0" class="diff-file-list">
+            <li
+              v-for="file in diffFiles"
+              :key="`${file.status}-${file.path}`"
+              class="diff-file-item"
+            >
+              <span class="diff-file-status">{{ file.status }}</span>
+              <span class="diff-file-path">{{ file.path }}</span>
+              <span v-if="file.geometry_changed" class="diff-file-flag">
+                geometry
+              </span>
+            </li>
+          </ul>
+
+          <ul
+            v-if="isDiffMode && diffManifestEntries.length > 0"
+            class="manifest-diff-list"
+          >
+            <li
+              v-for="entry in diffManifestEntries.slice(0, 6)"
+              :key="`${entry.change_type}-${entry.path}`"
+              class="manifest-diff-item"
+            >
+              {{ entry.message }}
+            </li>
+          </ul>
+        </div>
+
         <ul class="commit-list">
           <li
             v-for="commit in commitHistory"
-            :key="commit"
-            @click="checkoutCommit(commit)"
+            :key="commit.sha"
+            @click="checkoutCommit(commit.sha)"
             class="commit-item"
           >
-            {{ commit }}
+            <span class="commit-summary">{{ commit.summary }}</span>
+            <span class="commit-meta">{{ commit.short_sha }} - {{ commit.author }}</span>
           </li>
         </ul>
       </div>
@@ -159,14 +343,17 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import { useAssemblyTools } from "../composables/useAssemblyTools";
+import { useGitDiff } from "../composables/useGitDiff";
+import { useProjectBrowser } from "../composables/useProjectBrowser";
 import { useStlImport } from "../composables/useStlImport";
 import { useVersioning } from "../composables/useVersioning";
 import {
   activeMeshName,
   activeProjectName,
   assembly,
+  isProjectMode,
   isWireframe,
   scaleX,
   scaleY,
@@ -187,12 +374,105 @@ const {
   totalFilesToLoad,
   updateItemPosition,
 } = useStlImport();
-const { checkoutCommit, commitHistory, saveVersion, versionTargetName } =
-  useVersioning();
+const { isLoadingProject, openBrowser } = useProjectBrowser();
+const {
+  checkoutCommit,
+  commitHistory,
+  isSavingVersion,
+  saveAsNewProject,
+  saveVersion,
+  suggestedProjectName,
+  versionTargetName,
+} = useVersioning();
 const { debugTargetName, isScaling, prepareWasm, scaleAssembly } =
   useAssemblyTools();
+const {
+  diffError,
+  diffFiles,
+  diffManifestEntries,
+  diffOpacity,
+  diffResult,
+  diffVisualizationMode,
+  isDiffMode,
+  isLoadingDiff,
+  loadDiff,
+  selectedBaseSha,
+  selectedHeadSha,
+  setDiffMode,
+} = useGitDiff();
 
+const commitMessage = ref("");
+const newProjectName = ref("");
 const selectedPartName = computed(() => selectedAssemblyItem.value?.name ?? null);
+const sessionModeLabel = computed(() => (isProjectMode.value ? "Project Mode" : "File Mode"));
+const sessionTitle = computed(
+  () => activeProjectName.value?.trim() || "Unsaved Session",
+);
+const displayedProjectName = computed(() => sessionTitle.value);
+const canEnableDiff = computed(() => commitHistory.value.length > 1);
+const baseOpacityPercent = computed(() => Math.round((1 - diffOpacity.value) * 100));
+const canCompareSelectedCommits = computed(
+  () =>
+    Boolean(versionTargetName.value) &&
+    Boolean(selectedBaseSha.value) &&
+    Boolean(selectedHeadSha.value) &&
+    selectedBaseSha.value !== selectedHeadSha.value,
+);
+const headOpacityPercent = computed(() => Math.round(diffOpacity.value * 100));
+
+watch(
+  [isProjectMode, suggestedProjectName],
+  ([projectMode, suggestedName]) => {
+    if (projectMode) {
+      return;
+    }
+
+    if (!newProjectName.value.trim()) {
+      newProjectName.value = suggestedName;
+    }
+  },
+  { immediate: true },
+);
+
+watch(
+  commitHistory,
+  (commits) => {
+    if (commits.length === 0) {
+      selectedBaseSha.value = null;
+      selectedHeadSha.value = null;
+      setDiffMode(false);
+      return;
+    }
+
+    const hasSelectedBase = commits.some((commit) => commit.sha === selectedBaseSha.value);
+    const hasSelectedHead = commits.some((commit) => commit.sha === selectedHeadSha.value);
+
+    if (!hasSelectedHead) {
+      selectedHeadSha.value = commits[0]?.sha ?? null;
+    }
+
+    if (!hasSelectedBase || selectedBaseSha.value === selectedHeadSha.value) {
+      selectedBaseSha.value =
+        commits.find((commit) => commit.sha !== selectedHeadSha.value)?.sha ?? null;
+    }
+
+    if (commits.length < 2) {
+      setDiffMode(false);
+    }
+  },
+  { immediate: true },
+);
+
+watch(
+  [isDiffMode, selectedBaseSha, selectedHeadSha, versionTargetName],
+  ([diffModeEnabled, baseSha, headSha, projectName]) => {
+    if (!diffModeEnabled || !projectName || !baseSha || !headSha || baseSha === headSha) {
+      return;
+    }
+
+    void loadDiff(projectName, baseSha, headSha);
+  },
+);
 
 function setPartVisibility(itemId: string, event: Event): void {
   const target = event.target;
@@ -210,6 +490,32 @@ function setPartPosition(itemId: string, axis: Axis, event: Event): void {
   }
 
   updateItemPosition(itemId, axis, Number(target.value));
+}
+
+function toggleDiffMode(event: Event): void {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement)) {
+    return;
+  }
+
+  setDiffMode(target.checked);
+}
+
+function handleSaveVersion(): void {
+  void saveVersion(commitMessage.value);
+}
+
+function handleSaveAsNewProject(): void {
+  const projectName = newProjectName.value.trim();
+  if (!projectName) {
+    return;
+  }
+
+  void saveAsNewProject(projectName);
+}
+
+function openProjectBrowser(): void {
+  void openBrowser();
 }
 </script>
 
@@ -268,6 +574,11 @@ p {
   opacity: 0.7;
 }
 
+.primary-actions {
+  display: grid;
+  gap: 10px;
+}
+
 .file-info {
   margin-top: 20px;
   padding-top: 15px;
@@ -283,6 +594,50 @@ p {
 
 .save-btn:hover {
   background-color: #059669;
+}
+
+.browse-btn {
+  background-color: #0ea5e9;
+}
+
+.browse-btn:hover {
+  background-color: #0284c7;
+}
+
+.versioning-section {
+  background-color: #0f172a;
+  border-radius: 6px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.text-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field-label {
+  font-size: 0.8rem;
+  color: #cbd5e1;
+  font-weight: 600;
+}
+
+.text-input {
+  width: 100%;
+  background-color: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  color: #f8fafc;
+  padding: 8px 10px;
+  font-size: 0.85rem;
+}
+
+.text-input:focus {
+  outline: none;
+  border-color: #3b82f6;
 }
 
 .wasm-btn {
@@ -343,6 +698,191 @@ p {
 
 .history-section {
   margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.empty-history {
+  margin-top: -4px;
+}
+
+.diff-section {
+  background-color: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.diff-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.diff-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: #cbd5e1;
+}
+
+.diff-selects {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.diff-visualization {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.diff-mode-buttons {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.diff-mode-btn {
+  border: 1px solid #334155;
+  border-radius: 6px;
+  background: #1e293b;
+  color: #cbd5e1;
+  padding: 8px 10px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.diff-mode-btn.active {
+  background: #1d4ed8;
+  border-color: #60a5fa;
+  color: #eff6ff;
+}
+
+.diff-opacity-control {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: #cbd5e1;
+}
+
+.diff-opacity-control input[type="range"] {
+  width: 100%;
+  accent-color: #22c55e;
+}
+
+.diff-opacity-labels {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.74rem;
+}
+
+.base-swatch {
+  color: #fca5a5;
+}
+
+.head-swatch {
+  color: #86efac;
+}
+
+.diff-selects label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.8rem;
+  color: #94a3b8;
+}
+
+.diff-selects select {
+  background-color: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  color: #f8fafc;
+  padding: 6px 8px;
+  font-size: 0.8rem;
+}
+
+.diff-selects select:disabled {
+  opacity: 0.6;
+}
+
+.diff-warning,
+.diff-error {
+  margin: 0;
+  font-size: 0.8rem;
+}
+
+.diff-warning {
+  color: #fbbf24;
+}
+
+.diff-error {
+  color: #fca5a5;
+}
+
+.diff-file-list,
+.manifest-diff-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.diff-file-item,
+.manifest-diff-item {
+  background-color: rgba(30, 41, 59, 0.75);
+  border: 1px solid rgba(71, 85, 105, 0.5);
+  border-radius: 6px;
+  padding: 8px;
+  font-size: 0.78rem;
+}
+
+.diff-file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.diff-file-status {
+  text-transform: uppercase;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #93c5fd;
+}
+
+.diff-file-path {
+  flex: 1;
+  color: #e2e8f0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-file-flag {
+  color: #86efac;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+}
+
+.manifest-diff-item {
+  color: #cbd5e1;
 }
 
 .commit-list {
@@ -362,10 +902,22 @@ p {
   border-radius: 4px;
   cursor: pointer;
   transition: background-color 0.2s;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .commit-item:hover {
   background-color: #1e293b;
+}
+
+.commit-summary {
+  color: #e2e8f0;
+}
+
+.commit-meta {
+  color: #94a3b8;
+  font-size: 0.75rem;
 }
 
 .view-options label {

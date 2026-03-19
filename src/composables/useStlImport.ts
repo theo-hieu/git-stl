@@ -5,7 +5,6 @@ import { MeshBVH, type SerializedBVH } from "three-mesh-bvh";
 import { computed, markRaw, ref } from "vue";
 import {
   activeMeshName,
-  activeProjectName,
   assembly,
   cameraPosition,
   controlsTarget,
@@ -39,8 +38,10 @@ type StlWorkerResponse = StlWorkerSuccess | StlWorkerFailure;
 
 interface QueuedFile {
   batchId: number;
-  filePath: string;
+  name: string;
   order: number;
+  sourcePath: string;
+  buffer?: ArrayBuffer;
 }
 
 interface PendingBatch {
@@ -53,6 +54,12 @@ interface PendingBatch {
 
 interface ProcessStlFilesOptions {
   frameOnComplete?: boolean;
+}
+
+export interface StlImportSource {
+  name: string;
+  sourcePath: string;
+  buffer?: ArrayBuffer;
 }
 
 class StlImportError extends Error {
@@ -104,11 +111,6 @@ function getGeometryCacheKey(filePath: string): string {
   return filePath.toLowerCase();
 }
 
-function deriveProjectName(filePath: string): string {
-  const fileName = filePath.split(/[\\/]/).pop() ?? filePath;
-  return fileName.replace(/\.stl$/i, "") || "assembly-project";
-}
-
 function buildGeometry(
   positions: Float32Array,
   normals: Float32Array,
@@ -156,6 +158,14 @@ function releaseWorker(worker: Worker): void {
   worker.terminate();
 }
 
+export function releaseGeometryResources(geometry: BufferGeometry): void {
+  if (geometry.boundsTree) {
+    geometry.disposeBoundsTree();
+  }
+
+  geometry.dispose();
+}
+
 function releaseAssemblyItemResources(item: AssemblyItem): void {
   item.material.dispose();
 
@@ -166,20 +176,14 @@ function releaseAssemblyItemResources(item: AssemblyItem): void {
     cachedEntry.refCount -= 1;
 
     if (cachedEntry.refCount <= 0) {
-      if (cachedEntry.geometry.boundsTree) {
-        cachedEntry.geometry.disposeBoundsTree();
-      }
-      cachedEntry.geometry.dispose();
+      releaseGeometryResources(cachedEntry.geometry);
       geometryCache.delete(cacheKey);
     }
 
     return;
   }
 
-  if (item.geometry.boundsTree) {
-    item.geometry.disposeBoundsTree();
-  }
-  item.geometry.dispose();
+  releaseGeometryResources(item.geometry);
 }
 
 async function parseStlBuffer(buffer: ArrayBuffer): Promise<BufferGeometry> {
@@ -209,6 +213,12 @@ async function parseStlBuffer(buffer: ArrayBuffer): Promise<BufferGeometry> {
     const request: StlWorkerRequest = { id: requestId, buffer };
     worker.postMessage(request, [buffer]);
   });
+}
+
+export async function parseStlArrayBuffer(
+  buffer: ArrayBuffer,
+): Promise<BufferGeometry> {
+  return parseStlBuffer(buffer);
 }
 
 function frameAssembly(): void {
@@ -253,11 +263,10 @@ function frameAssembly(): void {
 }
 
 async function processFile(queuedFile: QueuedFile): Promise<void> {
-  const { batchId, filePath, order } = queuedFile;
-  const name = filePath.split(/[\\/]/).pop() ?? filePath;
+  const { batchId, buffer, name, order, sourcePath } = queuedFile;
 
   try {
-    const cacheKey = getGeometryCacheKey(filePath);
+    const cacheKey = getGeometryCacheKey(sourcePath);
     const cachedGeometry = geometryCache.get(cacheKey);
     let geometry: BufferGeometry;
 
@@ -265,18 +274,24 @@ async function processFile(queuedFile: QueuedFile): Promise<void> {
       cachedGeometry.refCount += 1;
       geometry = cachedGeometry.geometry;
     } else {
-      const fileContents = await readFile(filePath);
-      const buffer = fileContents.buffer.slice(
-        fileContents.byteOffset,
-        fileContents.byteOffset + fileContents.byteLength,
-      );
-      geometry = await parseStlBuffer(buffer);
+      if (buffer) {
+        geometry = await parseStlBuffer(buffer);
+      } else {
+        const fileContents = await readFile(sourcePath);
+        geometry = await parseStlBuffer(
+          fileContents.buffer.slice(
+            fileContents.byteOffset,
+            fileContents.byteOffset + fileContents.byteLength,
+          ),
+        );
+      }
+
       geometryCache.set(cacheKey, { geometry, refCount: 1 });
     }
 
     const item = createAssemblyItem({
       name,
-      sourcePath: filePath,
+      sourcePath,
       geometry,
     });
 
@@ -289,13 +304,7 @@ async function processFile(queuedFile: QueuedFile): Promise<void> {
       batch.results[order] = item;
     }
   } catch (error) {
-    if (error instanceof StlImportError && error.code === "ascii_stl_unsupported") {
-      alert(
-        `"${name}" looks like an ASCII STL. Binary STL import is currently supported in the Wasm parser path.`,
-      );
-    } else {
-      console.error(`Failed to import STL "${name}":`, error);
-    }
+    console.error(`Failed to import STL "${name}":`, error);
   } finally {
     filesLoaded.value += 1;
     activeWorkers.value -= 1;
@@ -339,7 +348,20 @@ async function processStlFiles(
   filePaths: string[],
   options: ProcessStlFilesOptions = {},
 ): Promise<AssemblyItem[]> {
-  if (filePaths.length === 0) {
+  return processStlSources(
+    filePaths.map((filePath) => ({
+      name: filePath.split(/[\\/]/).pop() ?? filePath,
+      sourcePath: filePath,
+    })),
+    options,
+  );
+}
+
+async function processStlSources(
+  sources: StlImportSource[],
+  options: ProcessStlFilesOptions = {},
+): Promise<AssemblyItem[]> {
+  if (sources.length === 0) {
     return [];
   }
 
@@ -353,23 +375,25 @@ async function processStlFiles(
   }
 
   const batchId = createBatchId();
-  totalFilesToLoad.value += filePaths.length;
+  totalFilesToLoad.value += sources.length;
 
   const batchPromise = new Promise<AssemblyItem[]>((resolve) => {
     pendingBatches.set(batchId, {
-      expected: filePaths.length,
+      expected: sources.length,
       completed: 0,
       frameOnComplete: options.frameOnComplete ?? true,
-      results: new Array<AssemblyItem | undefined>(filePaths.length),
+      results: new Array<AssemblyItem | undefined>(sources.length),
       resolve,
     });
   });
 
   fileQueue.value.push(
-    ...filePaths.map((filePath, order) => ({
+    ...sources.map((source, order) => ({
       batchId,
-      filePath,
+      buffer: source.buffer,
+      name: source.name,
       order,
+      sourcePath: source.sourcePath,
     })),
   );
 
@@ -390,10 +414,6 @@ async function openFiles(): Promise<void> {
   const paths = Array.isArray(selected) ? selected : [selected];
   if (paths.length === 0) {
     return;
-  }
-
-  if (!activeProjectName.value) {
-    activeProjectName.value = deriveProjectName(paths[0]);
   }
 
   await processStlFiles(paths);
@@ -472,9 +492,6 @@ function removePart(itemId: string): void {
     activeMeshName.value = assembly.value[assembly.value.length - 1]?.name ?? null;
   }
 
-  if (assembly.value.length === 0) {
-    activeProjectName.value = null;
-  }
 }
 
 function clearAssembly(): void {
@@ -506,6 +523,7 @@ export function useStlImport() {
     isImporting,
     openFiles,
     processStlFiles,
+    processStlSources,
     removePart,
     releaseAssemblyItemResources,
     selectItem,

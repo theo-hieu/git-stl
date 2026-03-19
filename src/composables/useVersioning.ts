@@ -1,7 +1,10 @@
+import { invoke } from "@tauri-apps/api/core";
+import { message as showMessage } from "@tauri-apps/plugin-dialog";
 import { appDataDir, join } from "@tauri-apps/api/path";
 import {
   exists,
   mkdir,
+  readFile,
   readDir,
   readTextFile,
   remove,
@@ -22,8 +25,8 @@ import {
   type AssemblyVector3,
 } from "../store";
 
-const MANIFEST_FILE_NAME = "manifest.json";
-const PARTS_DIRECTORY_NAME = "parts";
+export const MANIFEST_FILE_NAME = "manifest.json";
+export const PARTS_DIRECTORY_NAME = "parts";
 
 export interface AssemblyManifestItem {
   id: string;
@@ -31,6 +34,7 @@ export interface AssemblyManifestItem {
   fileName: string;
   position: AssemblyVector3;
   rotation: AssemblyVector3;
+  scale: AssemblyVector3;
   visible: boolean;
 }
 
@@ -42,10 +46,25 @@ export interface AssemblyManifest {
   items: AssemblyManifestItem[];
 }
 
-const commitHistory = ref<string[]>([]);
+export interface CommitHistoryEntry {
+  sha: string;
+  short_sha: string;
+  summary: string;
+  author: string;
+  time: number;
+  label: string;
+}
 
-function sanitizeProjectSegment(value: string): string {
-  return value.replace(/[^a-zA-Z0-9-_]+/g, "_") || "assembly-project";
+const commitHistory = ref<CommitHistoryEntry[]>([]);
+const isSavingVersion = ref(false);
+
+export function sanitizeProjectSegment(value: string): string {
+  const sanitized = value.replace(/[^a-zA-Z0-9-_]+/g, "_");
+  return sanitized.replace(/_/g, "") ? sanitized : "assembly-project";
+}
+
+function normalizeProjectName(projectName: string): string {
+  return projectName.trim();
 }
 
 function createPartFileName(item: AssemblyItem): string {
@@ -74,7 +93,7 @@ function parseManifestItem(value: unknown): AssemblyManifestItem {
     throw new Error("Manifest item is not an object.");
   }
 
-  const { id, name, fileName, position, rotation, visible } = value;
+  const { id, name, fileName, position, rotation, scale, visible } = value;
   if (
     typeof id !== "string" ||
     typeof name !== "string" ||
@@ -90,11 +109,12 @@ function parseManifestItem(value: unknown): AssemblyManifestItem {
     fileName,
     position: parseVector3(position, `${name}.position`),
     rotation: parseVector3(rotation, `${name}.rotation`),
+    scale: scale === undefined ? [1, 1, 1] : parseVector3(scale, `${name}.scale`),
     visible,
   };
 }
 
-function parseManifest(raw: string): AssemblyManifest {
+export function parseManifest(raw: string): AssemblyManifest {
   const parsed: unknown = JSON.parse(raw);
   if (!isRecord(parsed)) {
     throw new Error("Manifest JSON root is invalid.");
@@ -166,36 +186,19 @@ function buildManifest(projectName: string): AssemblyManifest {
       fileName: createPartFileName(item),
       position: [...item.position] as AssemblyVector3,
       rotation: [...item.rotation] as AssemblyVector3,
+      scale: [...item.scale] as AssemblyVector3,
       visible: item.visible,
     })),
   };
 }
 
-async function getProjectDirectory(projectName: string): Promise<string> {
+export async function getProjectDirectory(projectName: string): Promise<string> {
   const appDataDirPath = await appDataDir();
   return join(
     appDataDirPath,
     "STL_Viewer_Projects",
     sanitizeProjectSegment(projectName),
   );
-}
-
-async function ensureProjectRepository(projectDir: string): Promise<void> {
-  if (!(await exists(projectDir))) {
-    await mkdir(projectDir, { recursive: true });
-  }
-
-  await Command.create("git", ["init"], { cwd: projectDir }).execute();
-  await Command.create(
-    "git",
-    ["config", "user.name", "STL Viewer App"],
-    { cwd: projectDir },
-  ).execute();
-  await Command.create(
-    "git",
-    ["config", "user.email", "stl@viewer.local"],
-    { cwd: projectDir },
-  ).execute();
 }
 
 async function fetchHistoryForProject(projectName: string | null): Promise<void> {
@@ -217,18 +220,9 @@ async function fetchHistoryForProject(projectName: string | null): Promise<void>
       return;
     }
 
-    const logOutput = await Command.create(
-      "git",
-      ["log", "--pretty=format:%h - %an, %ar : %s"],
-      { cwd: projectDir },
-    ).execute();
-
-    if (logOutput.code === 0) {
-      commitHistory.value = logOutput.stdout.split("\n").filter(Boolean);
-      return;
-    }
-
-    commitHistory.value = [];
+    commitHistory.value = await invoke<CommitHistoryEntry[]>("get_commit_history", {
+      repoPath: projectDir,
+    });
   } catch (error) {
     console.error("Failed to fetch version history:", error);
     commitHistory.value = [];
@@ -261,7 +255,14 @@ async function syncProjectFiles(
     }
 
     const filePath = await join(partsDir, manifestItem.fileName);
-    await writeFile(filePath, exportAssemblyItem(sourceItem));
+    const fileExists = await exists(filePath);
+
+    if (sourceItem.geometryModified) {
+      await writeFile(filePath, exportAssemblyItem(sourceItem));
+      sourceItem.geometryModified = false;
+    } else if (!fileExists) {
+      await writeFile(filePath, await readFile(sourceItem.sourcePath));
+    }
   }
 
   const manifestPath = await join(projectDir, MANIFEST_FILE_NAME);
@@ -274,7 +275,7 @@ async function getManifestFilePaths(manifest: AssemblyManifest, projectDir: stri
   );
 }
 
-async function applyManifestToRestoredItems(
+export async function applyManifestToRestoredItems(
   manifest: AssemblyManifest,
   projectDir: string,
   restoredItems: AssemblyItem[],
@@ -297,7 +298,9 @@ async function applyManifestToRestoredItems(
     restoredItem.name = manifestItem.name;
     restoredItem.position = [...manifestItem.position] as AssemblyVector3;
     restoredItem.rotation = [...manifestItem.rotation] as AssemblyVector3;
+    restoredItem.scale = [...manifestItem.scale] as AssemblyVector3;
     restoredItem.visible = manifestItem.visible;
+    restoredItem.geometryModified = false;
     orderedItems.push(restoredItem);
   }
 
@@ -307,50 +310,102 @@ async function applyManifestToRestoredItems(
 export function useVersioning() {
   const { clearAssembly, frameAssembly, processStlFiles } = useStlImport();
 
-  const versionTargetName = computed(
-    () =>
-      activeProjectName.value ??
-      assembly.value[0]?.name.replace(/\.stl$/i, "") ??
-      null,
+  const suggestedProjectName = computed(
+    () => assembly.value[0]?.name.replace(/\.stl$/i, "") ?? "",
   );
+  const versionTargetName = computed(() => activeProjectName.value);
 
   watch(
-    versionTargetName,
+    activeProjectName,
     async (projectName) => {
       await fetchHistoryForProject(projectName);
     },
     { immediate: true },
   );
 
-  async function saveVersion(): Promise<void> {
-    const projectName = versionTargetName.value;
-    if (!projectName || assembly.value.length === 0) {
+  async function commitProjectSnapshot(
+    projectName: string,
+    message: string,
+  ): Promise<void> {
+    const normalizedProjectName = normalizeProjectName(projectName);
+
+    if (!normalizedProjectName) {
+      throw new Error("A project name is required.");
+    }
+
+    const normalizedMessage = message.trim() || `Assembly saved at ${new Date().toLocaleString()}`;
+    const projectDir = await getProjectDirectory(normalizedProjectName);
+    const manifest = buildManifest(normalizedProjectName);
+
+    await syncProjectFiles(projectDir, manifest);
+    await invoke<boolean>("commit_assembly", {
+      projectName: normalizedProjectName,
+      message: normalizedMessage,
+    });
+
+    activeProjectName.value = normalizedProjectName;
+    await fetchHistoryForProject(normalizedProjectName);
+  }
+
+  async function saveAsNewProject(projectName: string): Promise<void> {
+    const normalizedProjectName = normalizeProjectName(projectName);
+
+    if (!normalizedProjectName || assembly.value.length === 0 || isSavingVersion.value) {
       return;
     }
 
+    isSavingVersion.value = true;
+
     try {
-      const projectDir = await getProjectDirectory(projectName);
-      await ensureProjectRepository(projectDir);
+      const projectDir = await getProjectDirectory(normalizedProjectName);
+      if (await exists(projectDir)) {
+        throw new Error(`A project named "${normalizedProjectName}" already exists.`);
+      }
 
-      const manifest = buildManifest(projectName);
-      await syncProjectFiles(projectDir, manifest);
-
-      await Command.create("git", ["add", "."], { cwd: projectDir }).execute();
-      await Command.create(
-        "git",
-        ["commit", "-m", `Assembly saved at ${new Date().toLocaleString()}`],
-        { cwd: projectDir },
-      ).execute();
-
-      await fetchHistoryForProject(projectName);
+      await mkdir(projectDir, { recursive: true });
+      await commitProjectSnapshot(normalizedProjectName, "Initial project import");
     } catch (error) {
-      console.error("Failed to save assembly version:", error);
+      console.error("Failed to save new project:", error);
+      await showMessage(String(error), {
+        title: "Project save failed",
+        kind: "error",
+      });
+    } finally {
+      isSavingVersion.value = false;
     }
   }
 
-  async function checkoutCommit(commitLabel: string): Promise<void> {
+  async function saveVersion(message: string): Promise<void> {
+    const projectName = activeProjectName.value;
+
+    if (!projectName || isSavingVersion.value) {
+      return;
+    }
+
+    isSavingVersion.value = true;
+
+    try {
+      const projectDir = await getProjectDirectory(projectName);
+      if (!(await exists(projectDir))) {
+        throw new Error(
+          `The project directory for "${projectName}" could not be found.`,
+        );
+      }
+
+      await commitProjectSnapshot(projectName, message);
+    } catch (error) {
+      console.error("Failed to save assembly version:", error);
+      await showMessage(String(error), {
+        title: "Save failed",
+        kind: "error",
+      });
+    } finally {
+      isSavingVersion.value = false;
+    }
+  }
+
+  async function checkoutCommit(hash: string): Promise<void> {
     const projectName = versionTargetName.value;
-    const hash = commitLabel.split(" ")[0];
 
     if (!projectName || !hash) {
       return;
@@ -407,7 +462,10 @@ export function useVersioning() {
   return {
     checkoutCommit,
     commitHistory,
+    isSavingVersion,
+    saveAsNewProject,
     saveVersion,
+    suggestedProjectName,
     versionTargetName,
   };
 }

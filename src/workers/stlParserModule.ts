@@ -1,8 +1,8 @@
 export interface StlParserModule {
   _malloc(bytes: number): number;
   _free(ptr: number): void;
-  _getBinaryStlFloatCount(dataPtr: number, length: number): number;
-  _parseBinaryStl(dataPtr: number, length: number): number;
+  _getStlFloatCount(dataPtr: number, length: number): number;
+  _parseStl(dataPtr: number, length: number): number;
   _getParsedStlPositions(resultPtr: number): number;
   _getParsedStlNormals(resultPtr: number): number;
   _getParsedStlFloatCount(resultPtr: number): number;
@@ -20,6 +20,10 @@ type WasmExports = WebAssembly.Exports & {
   malloc?: NumericFn;
   _free?: NumericFn;
   free?: NumericFn;
+  _getStlFloatCount?: NumericFn;
+  getStlFloatCount?: NumericFn;
+  _parseStl?: NumericFn;
+  parseStl?: NumericFn;
   _getBinaryStlFloatCount?: NumericFn;
   getBinaryStlFloatCount?: NumericFn;
   _parseBinaryStl?: NumericFn;
@@ -92,11 +96,15 @@ export async function createStlParserModule(): Promise<StlParserModule> {
 
   const malloc = getFunction(exports, ["_malloc", "malloc"]);
   const free = getFunction(exports, ["_free", "free"]);
-  const getBinaryStlFloatCount = getFunction(exports, [
+  const getStlFloatCount = getFunction(exports, [
+    "_getStlFloatCount",
+    "getStlFloatCount",
     "_getBinaryStlFloatCount",
     "getBinaryStlFloatCount",
   ]);
-  const parseBinaryStl = getFunction(exports, [
+  const parseStl = getFunction(exports, [
+    "_parseStl",
+    "parseStl",
     "_parseBinaryStl",
     "parseBinaryStl",
   ]);
@@ -129,13 +137,13 @@ export async function createStlParserModule(): Promise<StlParserModule> {
       free(ptr);
       refreshViews();
     },
-    _getBinaryStlFloatCount(dataPtr: number, length: number) {
+    _getStlFloatCount(dataPtr: number, length: number) {
       refreshViews();
-      return getBinaryStlFloatCount(dataPtr, length);
+      return getStlFloatCount(dataPtr, length);
     },
-    _parseBinaryStl(dataPtr: number, length: number) {
+    _parseStl(dataPtr: number, length: number) {
       refreshViews();
-      const ptr = parseBinaryStl(dataPtr, length);
+      const ptr = parseStl(dataPtr, length);
       refreshViews();
       return ptr;
     },

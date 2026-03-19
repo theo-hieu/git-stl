@@ -2,10 +2,12 @@
   <div class="app-layout">
     <Sidebar />
     <Scene />
+    <ProjectBrowser />
   </div>
 </template>
 
 <script setup lang="ts">
+import ProjectBrowser from "./components/ProjectBrowser.vue";
 import Sidebar from "./components/Sidebar.vue";
 import Scene from "./components/Scene.vue";
 </script>

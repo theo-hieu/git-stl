@@ -71,6 +71,10 @@ export function useAssemblyTools() {
       console.log(
         `[WasmEngine] XYZ-scale applied to ${assembly.value.length} mesh(es): X=${scaleX.value} Y=${scaleY.value} Z=${scaleZ.value}`,
       );
+
+      for (const item of assembly.value) {
+        item.geometryModified = true;
+      }
     } catch (error) {
       console.error("[WasmEngine] scaleAssembly failed:", error);
       alert("Wasm scale failed. Check the console for details.");
