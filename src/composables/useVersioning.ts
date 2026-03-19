@@ -15,11 +15,20 @@ import { Command } from "@tauri-apps/plugin-shell";
 import { Mesh, MeshStandardMaterial } from "three";
 import { STLExporter } from "three/examples/jsm/exporters/STLExporter.js";
 import { computed, ref, watch } from "vue";
+import { captureThumbnail } from "./useSceneThumbnail";
 import { useStlImport } from "./useStlImport";
 import {
   activeMeshName,
   activeProjectName,
   assembly,
+  cameraPosition,
+  controlsTarget,
+  defaultCameraPosition,
+  defaultControlsTarget,
+  isWireframe,
+  scaleX,
+  scaleY,
+  scaleZ,
   selectedItemId,
   type AssemblyItem,
   type AssemblyVector3,
@@ -336,11 +345,13 @@ export function useVersioning() {
     const normalizedMessage = message.trim() || `Assembly saved at ${new Date().toLocaleString()}`;
     const projectDir = await getProjectDirectory(normalizedProjectName);
     const manifest = buildManifest(normalizedProjectName);
+    const thumbnailBase64 = captureThumbnail();
 
     await syncProjectFiles(projectDir, manifest);
     await invoke<boolean>("commit_assembly", {
       projectName: normalizedProjectName,
       message: normalizedMessage,
+      thumbnailBase64,
     });
 
     activeProjectName.value = normalizedProjectName;
@@ -459,10 +470,30 @@ export function useVersioning() {
     }
   }
 
+  function resetSession(): void {
+    try {
+      clearAssembly();
+    } catch (error) {
+      console.error("Failed to fully dispose the current assembly during reset:", error);
+      assembly.value.splice(0, assembly.value.length);
+      selectedItemId.value = null;
+      activeMeshName.value = null;
+    }
+
+    isWireframe.value = false;
+    scaleX.value = 1;
+    scaleY.value = 1;
+    scaleZ.value = 1;
+    cameraPosition.value = [...defaultCameraPosition] as AssemblyVector3;
+    controlsTarget.value = [...defaultControlsTarget] as AssemblyVector3;
+    activeProjectName.value = null;
+  }
+
   return {
     checkoutCommit,
     commitHistory,
     isSavingVersion,
+    resetSession,
     saveAsNewProject,
     saveVersion,
     suggestedProjectName,

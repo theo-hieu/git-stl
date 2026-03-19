@@ -18,11 +18,13 @@ type Axis = "x" | "y" | "z";
 
 interface StlWorkerRequest {
   id: number;
+  type: "PARSE_STL";
   buffer: ArrayBuffer;
 }
 
 interface StlWorkerSuccess {
   id: number;
+  type: "PARSE_STL_RESULT";
   positions: Float32Array;
   normals: Float32Array;
   serializedBVH: SerializedBVH;
@@ -30,6 +32,7 @@ interface StlWorkerSuccess {
 
 interface StlWorkerFailure {
   id: number;
+  type: "ERROR";
   error: string;
   errorCode?: string;
 }
@@ -210,7 +213,7 @@ async function parseStlBuffer(buffer: ArrayBuffer): Promise<BufferGeometry> {
       reject(new Error(event.message));
     };
 
-    const request: StlWorkerRequest = { id: requestId, buffer };
+    const request: StlWorkerRequest = { id: requestId, type: "PARSE_STL", buffer };
     worker.postMessage(request, [buffer]);
   });
 }
@@ -498,10 +501,14 @@ function clearAssembly(): void {
   const existingItems = [...assembly.value];
 
   for (const item of existingItems) {
-    releaseAssemblyItemResources(item);
+    try {
+      releaseAssemblyItemResources(item);
+    } catch (error) {
+      console.error(`Failed to release resources for "${item.name}":`, error);
+    }
   }
 
-  assembly.value = [];
+  assembly.value.splice(0, assembly.value.length);
   selectedItemId.value = null;
   activeMeshName.value = null;
 

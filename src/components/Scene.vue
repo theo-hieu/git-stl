@@ -1,14 +1,5 @@
 <template>
   <div class="scene-container">
-    <div
-      v-if="isDiffMode && diffVisualizationMode === 'split'"
-      class="split-guide"
-      aria-hidden="true"
-    >
-      <span class="split-label split-label-base">Base</span>
-      <span class="split-label split-label-head">Head</span>
-    </div>
-
     <div v-if="selectedObject && !isDiffMode" class="transform-toolbar">
       <button
         class="transform-btn"
@@ -27,40 +18,101 @@
     </div>
 
     <TresCanvas clear-color="#0f172a" style="width: 100%; height: 100%;">
+      <DiffShaderWarmup />
+      <SceneCaptureBridge />
       <TresPerspectiveCamera :position="cameraPosition" />
       <OrbitControls :target="controlsTarget" v-bind="orbitControlsProps" />
       <TresDirectionalLight :position="[5, 5, 5]" :intensity="1" />
       <TresAmbientLight :intensity="0.5" />
 
-      <TresMesh
-        v-for="item in assembly"
-        :key="item.id"
-        :ref="(instance) => setMeshRef(item.id, instance)"
-        :geometry="item.geometry"
-        :material="item.material"
-        :position="item.position"
-        :rotation="item.rotation"
-        :scale="item.scale"
-        :visible="!isDiffMode && item.visible"
-        @click="selectItem(item.id)"
-      />
+      <TresGroup v-if="!isDiffMode">
+        <TresMesh
+          v-for="item in assembly"
+          :key="item.id"
+          :ref="(instance) => setMeshRef(item.id, instance)"
+          :geometry="item.geometry"
+          :material="item.material"
+          :position="item.position"
+          :rotation="item.rotation"
+          :scale="item.scale"
+          :visible="item.visible"
+          @click="selectItem(item.id)"
+        />
+      </TresGroup>
 
       <TresGroup v-if="isDiffMode">
-        <TresGroup v-for="overlay in diffOverlays" :key="overlay.id">
-          <TresMesh
-            v-if="overlay.oldGeometry && overlay.oldMaterial"
-            :geometry="overlay.oldGeometry"
-            :material="overlay.oldMaterial"
-            :position="getOverlayPosition(overlay.oldPosition, 'base')"
-            :rotation="overlay.oldRotation"
-          />
-          <TresMesh
-            v-if="overlay.newGeometry && overlay.newMaterial"
-            :geometry="overlay.newGeometry"
-            :material="overlay.newMaterial"
-            :position="getOverlayPosition(overlay.newPosition, 'head')"
-            :rotation="overlay.newRotation"
-          />
+        <TresGroup v-if="diffViewMode === 'overlay'">
+          <TresGroup
+            v-for="item in diffItems"
+            :key="`${item.id}-overlay`"
+            :visible="item.visible"
+          >
+            <TresMesh
+              v-if="item.oldGeometry && item.oldMaterial"
+              :geometry="item.oldGeometry"
+              :material="item.oldMaterial"
+              :position="item.oldPosition"
+              :rotation="item.oldRotation"
+              :scale="item.oldScale"
+            />
+            <TresLineSegments
+              v-if="item.oldEdgesGeometry && item.oldEdgeMaterial"
+              :geometry="item.oldEdgesGeometry"
+              :material="item.oldEdgeMaterial"
+              :position="item.oldPosition"
+              :rotation="item.oldRotation"
+              :scale="item.oldScale"
+            />
+            <TresMesh
+              v-if="item.newGeometry && item.newMaterial"
+              :geometry="item.newGeometry"
+              :material="item.newMaterial"
+              :position="item.newPosition"
+              :rotation="item.newRotation"
+              :scale="item.newScale"
+            />
+            <TresLineSegments
+              v-if="item.newEdgesGeometry && item.newEdgeMaterial"
+              :geometry="item.newEdgesGeometry"
+              :material="item.newEdgeMaterial"
+              :position="item.newPosition"
+              :rotation="item.newRotation"
+              :scale="item.newScale"
+            />
+          </TresGroup>
+        </TresGroup>
+
+        <TresGroup v-else>
+          <TresGroup
+            v-for="item in diffItems"
+            :key="`${item.id}-csg`"
+            :visible="item.visible"
+          >
+            <TresMesh
+              v-if="getCsgAddedGeometry(item)"
+              :geometry="getCsgAddedGeometry(item)"
+              :material="diffCsgAddedMaterial"
+              :position="item.newPosition"
+              :rotation="item.newRotation"
+              :scale="item.newScale"
+            />
+            <TresMesh
+              v-if="getCsgRemovedGeometry(item)"
+              :geometry="getCsgRemovedGeometry(item)"
+              :material="diffCsgRemovedMaterial"
+              :position="item.oldPosition"
+              :rotation="item.oldRotation"
+              :scale="item.oldScale"
+            />
+            <TresMesh
+              v-if="getCsgUnchangedGeometry(item)"
+              :geometry="getCsgUnchangedGeometry(item)"
+              :material="diffCsgUnchangedMaterial"
+              :position="item.newPosition"
+              :rotation="item.newRotation"
+              :scale="item.newScale"
+            />
+          </TresGroup>
         </TresGroup>
       </TresGroup>
 
@@ -80,11 +132,18 @@
 <script setup lang="ts">
 import { isObject3D } from "@tresjs/core";
 import { OrbitControls, TransformControls } from "@tresjs/cientos";
-import type { Object3D } from "three";
+import type { BufferGeometry, Object3D } from "three";
 import { computed, nextTick, ref, shallowRef, watch } from "vue";
-import { useGitDiff } from "../composables/useGitDiff";
+import { useGitDiff, type DiffItem } from "../composables/useGitDiff";
 import { useStlImport } from "../composables/useStlImport";
+import {
+  diffCsgAddedMaterial,
+  diffCsgRemovedMaterial,
+  diffCsgUnchangedMaterial,
+} from "../materials/diffMaterials";
 import AnimatedBox from "./AnimatedBox.vue";
+import DiffShaderWarmup from "./DiffShaderWarmup.vue";
+import SceneCaptureBridge from "./SceneCaptureBridge.vue";
 import {
   assembly,
   type AssemblyVector3,
@@ -99,8 +158,7 @@ import {
 type TransformMode = "translate" | "rotate";
 
 const { selectItem, updateItemTransform } = useStlImport();
-const { diffOverlays, diffSplitOffset, diffVisualizationMode, isDiffMode } =
-  useGitDiff();
+const { diffItems, diffViewMode, isDiffMode } = useGitDiff();
 const transformMode = ref<TransformMode>("translate");
 const isDraggingGizmo = ref(false);
 const meshRefs = new Map<string, Object3D>();
@@ -171,19 +229,28 @@ function setMeshRef(itemId: string, instance: unknown): void {
   }
 }
 
-function getOverlayPosition(
-  position: AssemblyVector3,
-  side: "base" | "head",
-): AssemblyVector3 {
-  if (diffVisualizationMode.value !== "split") {
-    return position;
+function getCsgAddedGeometry(item: DiffItem): BufferGeometry | undefined {
+  if (item.status === "added") {
+    return item.newGeometry ?? undefined;
   }
 
-  return [
-    position[0] + (side === "base" ? -diffSplitOffset.value : diffSplitOffset.value),
-    position[1],
-    position[2],
-  ];
+  return item.csgAdded ?? undefined;
+}
+
+function getCsgRemovedGeometry(item: DiffItem): BufferGeometry | undefined {
+  if (item.status === "removed") {
+    return item.oldGeometry ?? undefined;
+  }
+
+  return item.csgRemoved ?? undefined;
+}
+
+function getCsgUnchangedGeometry(item: DiffItem): BufferGeometry | undefined {
+  if (item.status === "unchanged" || !item.geometryChanged) {
+    return item.newGeometry ?? item.oldGeometry ?? undefined;
+  }
+
+  return item.csgUnchanged ?? undefined;
 }
 
 function commitSelectedTransform(): void {
@@ -226,53 +293,6 @@ function handleTransformDragging(isDragging: boolean): void {
   flex-grow: 1;
   position: relative;
   height: 100vh;
-}
-
-.split-guide {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  z-index: 8;
-}
-
-.split-guide::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 50%;
-  width: 1px;
-  background: linear-gradient(
-    180deg,
-    rgba(248, 250, 252, 0),
-    rgba(248, 250, 252, 0.5),
-    rgba(248, 250, 252, 0)
-  );
-}
-
-.split-label {
-  position: absolute;
-  top: 16px;
-  padding: 6px 10px;
-  border-radius: 999px;
-  font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: #f8fafc;
-  background: rgba(15, 23, 42, 0.8);
-  border: 1px solid rgba(148, 163, 184, 0.25);
-  backdrop-filter: blur(8px);
-}
-
-.split-label-base {
-  left: calc(50% - 108px);
-  color: #fca5a5;
-}
-
-.split-label-head {
-  left: calc(50% + 20px);
-  color: #86efac;
 }
 
 .transform-toolbar {

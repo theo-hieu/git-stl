@@ -1,4 +1,5 @@
 import { BufferAttribute, BufferGeometry } from "three";
+import { Brush, Evaluator, INTERSECTION, REVERSE_SUBTRACTION, SUBTRACTION } from "three-bvh-csg";
 import { MeshBVH, type SerializedBVH } from "three-mesh-bvh";
 import type { StlParserModule } from "./stlParserModule";
 
@@ -13,15 +14,47 @@ class StlParserError extends Error {
   }
 }
 
-interface StlWorkerSuccess {
+interface FlatGeometryPayload {
+  positions: Float32Array;
+  normals: Float32Array;
+}
+
+interface ParseStlRequest {
   id: number;
+  type: "PARSE_STL";
+  buffer: ArrayBuffer;
+}
+
+interface ComputeDiffRequest {
+  id: number;
+  type: "COMPUTE_DIFF";
+  oldBuffer: ArrayBuffer | null;
+  newBuffer: ArrayBuffer | null;
+}
+
+type StlWorkerRequest = ParseStlRequest | ComputeDiffRequest;
+
+interface ParseStlWorkerSuccess {
+  id: number;
+  type: "PARSE_STL_RESULT";
   positions: Float32Array;
   normals: Float32Array;
   serializedBVH: SerializedBVH;
 }
 
+interface ComputeDiffWorkerSuccess {
+  id: number;
+  type: "COMPUTE_DIFF_RESULT";
+  oldGeometry: FlatGeometryPayload | null;
+  newGeometry: FlatGeometryPayload | null;
+  csgAdded: FlatGeometryPayload | null;
+  csgRemoved: FlatGeometryPayload | null;
+  csgUnchanged: FlatGeometryPayload | null;
+}
+
 interface StlWorkerFailure {
   id: number;
+  type: "ERROR";
   error: string;
   errorCode?: string;
 }
@@ -55,6 +88,30 @@ function getTransferablesForGeometryPayload(
     (value): value is Transferable =>
       !(typeof SharedArrayBuffer !== "undefined" && value instanceof SharedArrayBuffer),
   );
+}
+
+function getTransferablesForFlatGeometry(payload: FlatGeometryPayload | null): Transferable[] {
+  if (!payload) {
+    return [];
+  }
+
+  const transferables: Transferable[] = [];
+
+  if (
+    !(typeof SharedArrayBuffer !== "undefined" &&
+      payload.positions.buffer instanceof SharedArrayBuffer)
+  ) {
+    transferables.push(payload.positions.buffer);
+  }
+
+  if (
+    !(typeof SharedArrayBuffer !== "undefined" &&
+      payload.normals.buffer instanceof SharedArrayBuffer)
+  ) {
+    transferables.push(payload.normals.buffer);
+  }
+
+  return transferables;
 }
 
 function parseStl(
@@ -110,33 +167,191 @@ function parseStl(
   }
 }
 
-self.onmessage = async (
-  event: MessageEvent<{ id: number; buffer: ArrayBuffer }>,
-) => {
-  const { id, buffer } = event.data;
+function buildGeometry(
+  positions: Float32Array,
+  normals: Float32Array,
+): BufferGeometry {
+  const geometry = new BufferGeometry();
+  geometry.setAttribute("position", new BufferAttribute(positions, 3));
+  geometry.setAttribute("normal", new BufferAttribute(normals, 3));
+  return geometry;
+}
+
+function geometryToPayload(geometry: BufferGeometry | null): FlatGeometryPayload | null {
+  if (!geometry) {
+    return null;
+  }
+
+  const preparedGeometry = geometry.index ? geometry.toNonIndexed() : geometry;
 
   try {
-    const mod = await getParserModule();
-    const { positions, normals } = parseStl(mod, buffer);
-    const workerGeometry = new BufferGeometry();
-    workerGeometry.setAttribute("position", new BufferAttribute(positions, 3));
+    const positionAttribute = preparedGeometry.getAttribute("position");
+    if (!positionAttribute || positionAttribute.count === 0) {
+      return null;
+    }
 
-    // MeshBVH generation is eager in the installed library version, so construction
-    // here performs the full spatial index build off the main thread.
-    const bvh = new MeshBVH(workerGeometry);
-    const serializedBVH = MeshBVH.serialize(bvh);
-    const response: StlWorkerSuccess = { id, positions, normals, serializedBVH };
+    if (!preparedGeometry.getAttribute("normal")) {
+      preparedGeometry.computeVertexNormals();
+    }
+
+    const normalAttribute = preparedGeometry.getAttribute("normal");
+    if (!normalAttribute) {
+      return null;
+    }
+
+    const positionsArray = positionAttribute.array;
+    const normalsArray = normalAttribute.array;
+
+    return {
+      positions:
+        positionsArray instanceof Float32Array
+          ? positionsArray.slice()
+          : Float32Array.from(positionsArray as ArrayLike<number>),
+      normals:
+        normalsArray instanceof Float32Array
+          ? normalsArray.slice()
+          : Float32Array.from(normalsArray as ArrayLike<number>),
+    };
+  } finally {
+    if (preparedGeometry !== geometry) {
+      preparedGeometry.dispose();
+    }
+  }
+}
+
+function computeDiffPayload(
+  oldGeometry: BufferGeometry | null,
+  newGeometry: BufferGeometry | null,
+): Omit<ComputeDiffWorkerSuccess, "id" | "type"> {
+  if (!oldGeometry || !newGeometry) {
+    return {
+      oldGeometry: geometryToPayload(oldGeometry),
+      newGeometry: geometryToPayload(newGeometry),
+      csgAdded: null,
+      csgRemoved: null,
+      csgUnchanged: null,
+    };
+  }
+
+  const oldBrush = new Brush(oldGeometry);
+  const newBrush = new Brush(newGeometry);
+  oldBrush.updateMatrixWorld(true);
+  newBrush.updateMatrixWorld(true);
+
+  const evaluator = new Evaluator();
+  evaluator.useGroups = false;
+
+  const [addedBrush, removedBrush, unchangedBrush] = evaluator.evaluate(
+    oldBrush,
+    newBrush,
+    [REVERSE_SUBTRACTION, SUBTRACTION, INTERSECTION],
+    [new Brush(), new Brush(), new Brush()],
+  );
+
+  try {
+    return {
+      oldGeometry: geometryToPayload(oldGeometry),
+      newGeometry: geometryToPayload(newGeometry),
+      csgAdded: geometryToPayload(addedBrush.geometry),
+      csgRemoved: geometryToPayload(removedBrush.geometry),
+      csgUnchanged: geometryToPayload(unchangedBrush.geometry),
+    };
+  } finally {
+    addedBrush.geometry.dispose();
+    removedBrush.geometry.dispose();
+    unchangedBrush.geometry.dispose();
+  }
+}
+
+async function handleParseRequest(
+  request: ParseStlRequest,
+): Promise<ParseStlWorkerSuccess> {
+  const mod = await getParserModule();
+  const { positions, normals } = parseStl(mod, request.buffer);
+  const workerGeometry = new BufferGeometry();
+  workerGeometry.setAttribute("position", new BufferAttribute(positions, 3));
+
+  // MeshBVH generation is eager in the installed library version, so construction
+  // here performs the full spatial index build off the main thread.
+  const serializedBVH = MeshBVH.serialize(new MeshBVH(workerGeometry));
+  workerGeometry.dispose();
+
+  return {
+    id: request.id,
+    type: "PARSE_STL_RESULT",
+    positions,
+    normals,
+    serializedBVH,
+  };
+}
+
+async function handleComputeDiffRequest(
+  request: ComputeDiffRequest,
+): Promise<ComputeDiffWorkerSuccess> {
+  const mod = await getParserModule();
+  const parsedOld = request.oldBuffer ? parseStl(mod, request.oldBuffer) : null;
+  const parsedNew = request.newBuffer ? parseStl(mod, request.newBuffer) : null;
+  const parsedOldGeometry = parsedOld
+    ? buildGeometry(parsedOld.positions, parsedOld.normals)
+    : null;
+  const parsedNewGeometry = parsedNew
+    ? buildGeometry(parsedNew.positions, parsedNew.normals)
+    : null;
+
+  try {
+    return {
+      id: request.id,
+      type: "COMPUTE_DIFF_RESULT",
+      ...computeDiffPayload(parsedOldGeometry, parsedNewGeometry),
+    };
+  } finally {
+    parsedOldGeometry?.dispose();
+    parsedNewGeometry?.dispose();
+  }
+}
+
+self.onmessage = async (event: MessageEvent<StlWorkerRequest>) => {
+  const request = event.data;
+
+  try {
+    if (request.type === "PARSE_STL") {
+      const response = await handleParseRequest(request);
+
+      (self as DedicatedWorkerGlobalScope).postMessage(
+        response,
+        getTransferablesForGeometryPayload(
+          response.positions,
+          response.normals,
+          response.serializedBVH,
+        ),
+      );
+      return;
+    }
+
+    const response = await handleComputeDiffRequest(request);
 
     (self as DedicatedWorkerGlobalScope).postMessage(
       response,
-      getTransferablesForGeometryPayload(positions, normals, serializedBVH),
+      [
+        ...getTransferablesForFlatGeometry(response.oldGeometry),
+        ...getTransferablesForFlatGeometry(response.newGeometry),
+        ...getTransferablesForFlatGeometry(response.csgAdded),
+        ...getTransferablesForFlatGeometry(response.csgRemoved),
+        ...getTransferablesForFlatGeometry(response.csgUnchanged),
+      ],
     );
   } catch (error) {
     const failure: StlWorkerFailure =
       error instanceof StlParserError
-        ? { id, error: error.message, errorCode: error.code }
+        ? {
+            id: request.id,
+            type: "ERROR",
+            error: error.message,
+            errorCode: error.code,
+          }
         : {
-            id,
+            id: request.id,
+            type: "ERROR",
             error: error instanceof Error ? error.message : String(error),
           };
 

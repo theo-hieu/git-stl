@@ -15,7 +15,7 @@
           <button
             type="button"
             class="close-btn"
-            :disabled="isLoadingProject"
+            :disabled="isLoadingProject || isDeletingProject"
             @click="closeBrowser"
           >
             Close
@@ -36,7 +36,7 @@
           <button
             type="button"
             class="refresh-btn"
-            :disabled="isFetchingProjects || isLoadingProject"
+            :disabled="isFetchingProjects || isLoadingProject || isDeletingProject"
             @click="fetchProjects"
           >
             {{ isFetchingProjects ? "Refreshing..." : "Refresh" }}
@@ -68,6 +68,18 @@
             :key="project.name"
             class="project-item"
           >
+            <div class="project-preview">
+              <img
+                v-if="project.thumbnailSrc"
+                :src="project.thumbnailSrc"
+                :alt="`${project.name} thumbnail`"
+                class="project-thumbnail"
+              />
+              <div v-else class="project-thumbnail-fallback" aria-hidden="true">
+                {{ project.name.slice(0, 2).toUpperCase() }}
+              </div>
+            </div>
+
             <div class="project-copy">
               <strong class="project-name">{{ project.name }}</strong>
               <span class="project-date">
@@ -75,20 +87,71 @@
               </span>
             </div>
 
-            <button
-              type="button"
-              class="open-btn"
-              :disabled="isLoadingProject"
-              @click="loadProject(project.name)"
-            >
-              {{
-                loadingProjectName === project.name
-                  ? "Opening..."
-                  : "Open"
-              }}
-            </button>
+            <div class="project-actions">
+              <button
+                type="button"
+                class="delete-btn"
+                :disabled="isLoadingProject || isDeletingProject"
+                @click="requestProjectDeletion(project)"
+              >
+                {{
+                  deletingProjectName === project.name && isDeletingProject
+                    ? "Deleting..."
+                    : "Delete"
+                }}
+              </button>
+
+              <button
+                type="button"
+                class="open-btn"
+                :disabled="isLoadingProject || isDeletingProject"
+                @click="loadProject(project.name)"
+              >
+                {{
+                  loadingProjectName === project.name
+                    ? "Opening..."
+                    : "Open"
+                }}
+              </button>
+            </div>
           </li>
         </ul>
+      </section>
+    </div>
+
+    <div
+      v-if="pendingDeletionProject"
+      class="confirm-backdrop"
+      @click.self="cancelProjectDeletion"
+    >
+      <section class="confirm-panel" aria-label="Delete project confirmation">
+        <p class="eyebrow warning-eyebrow">Delete Project</p>
+        <h2>Are you sure?</h2>
+        <p class="confirm-copy">
+          This will permanently delete
+          <strong>{{ pendingDeletionProject.name }}</strong>,
+          including its version history, manifest, parts, and thumbnail.
+        </p>
+
+        <div class="confirm-actions">
+          <button
+            type="button"
+            class="close-btn"
+            :disabled="isDeletingProject"
+            @click="cancelProjectDeletion"
+          >
+            Cancel
+          </button>
+
+          <button
+            type="button"
+            class="delete-btn confirm-delete-btn"
+            :disabled="isDeletingProject"
+            @click="confirmProjectDeletion"
+          >
+            {{ isDeletingProject ? "Deleting..." : "Yes, Delete Project" }}
+          </button>
+        </div>
       </section>
     </div>
   </teleport>
@@ -99,15 +162,21 @@ import { useProjectBrowser } from "../composables/useProjectBrowser";
 
 const {
   browserError,
+  cancelProjectDeletion,
   closeBrowser,
+  confirmProjectDeletion,
+  deletingProjectName,
   fetchProjects,
   filteredProjects,
+  isDeletingProject,
   isFetchingProjects,
   isLoadingProject,
   isProjectBrowserOpen,
   loadProject,
   loadingProjectName,
+  pendingDeletionProject,
   projects,
+  requestProjectDeletion,
   searchQuery,
 } = useProjectBrowser();
 
@@ -231,11 +300,43 @@ function formatModifiedDate(modifiedAt: number): string {
   border: 1px solid rgba(71, 85, 105, 0.7);
 }
 
+.project-preview {
+  width: 88px;
+  height: 64px;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid rgba(71, 85, 105, 0.8);
+  background:
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.16), transparent 45%),
+    linear-gradient(180deg, rgba(30, 41, 59, 0.95), rgba(15, 23, 42, 0.95));
+  flex-shrink: 0;
+}
+
+.project-thumbnail {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.project-thumbnail-fallback {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #bfdbfe;
+  font-size: 1rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
 .project-copy {
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  flex: 1;
 }
 
 .project-name {
@@ -246,6 +347,12 @@ function formatModifiedDate(modifiedAt: number): string {
 .project-date {
   color: #94a3b8;
   font-size: 0.8rem;
+}
+
+.project-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .status-message {
@@ -260,7 +367,8 @@ function formatModifiedDate(modifiedAt: number): string {
 
 .close-btn,
 .refresh-btn,
-.open-btn {
+.open-btn,
+.delete-btn {
   border: none;
   border-radius: 10px;
   font-weight: 700;
@@ -285,18 +393,78 @@ function formatModifiedDate(modifiedAt: number): string {
   min-width: 96px;
 }
 
+.delete-btn {
+  padding: 10px 16px;
+  background: rgba(127, 29, 29, 0.95);
+  color: #fee2e2;
+  min-width: 96px;
+}
+
 .close-btn:hover,
 .refresh-btn:hover,
-.open-btn:hover {
+.open-btn:hover,
+.delete-btn:hover {
   transform: translateY(-1px);
 }
 
 .close-btn:disabled,
 .refresh-btn:disabled,
-.open-btn:disabled {
+.open-btn:disabled,
+.delete-btn:disabled {
   cursor: wait;
   opacity: 0.65;
   transform: none;
+}
+
+.confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 6, 23, 0.76);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 24px;
+  z-index: 60;
+}
+
+.confirm-panel {
+  width: min(460px, 100%);
+  background:
+    radial-gradient(circle at top right, rgba(248, 113, 113, 0.14), transparent 42%),
+    linear-gradient(180deg, #111827 0%, #0f172a 100%);
+  border: 1px solid rgba(248, 113, 113, 0.22);
+  border-radius: 18px;
+  box-shadow: 0 28px 64px rgba(15, 23, 42, 0.5);
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  color: #e2e8f0;
+}
+
+.warning-eyebrow {
+  color: #fca5a5;
+}
+
+.confirm-panel h2 {
+  margin: -6px 0 0;
+  font-size: 1.45rem;
+}
+
+.confirm-copy {
+  margin: 0;
+  color: #cbd5e1;
+  line-height: 1.5;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.confirm-delete-btn {
+  min-width: 170px;
 }
 
 @media (max-width: 720px) {
@@ -309,15 +477,28 @@ function formatModifiedDate(modifiedAt: number): string {
   }
 
   .project-browser-toolbar,
-  .project-item {
+  .project-item,
+  .confirm-actions {
     flex-direction: column;
     align-items: stretch;
   }
 
+  .project-preview {
+    width: 100%;
+    height: 140px;
+  }
+
   .open-btn,
+  .delete-btn,
   .refresh-btn,
   .close-btn {
     width: 100%;
+  }
+
+  .project-actions {
+    width: 100%;
+    flex-direction: column;
+    align-items: stretch;
   }
 }
 </style>

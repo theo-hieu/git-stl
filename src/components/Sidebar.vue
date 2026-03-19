@@ -4,11 +4,26 @@
     <p>{{ sessionModeLabel }}</p>
 
     <div class="primary-actions">
-      <button @click="openFiles" class="action-btn" :disabled="isImporting || isLoadingProject">
+      <button
+        type="button"
+        @click="handleResetSession"
+        class="action-btn new-project-btn"
+        :disabled="isImporting || isLoadingProject || isSavingVersion"
+      >
+        + New Project
+      </button>
+
+      <button
+        type="button"
+        @click="openFiles"
+        class="action-btn"
+        :disabled="isImporting || isLoadingProject"
+      >
         {{ isImporting ? "Importing..." : "Import Assembly (Multi-Select)" }}
       </button>
 
       <button
+        type="button"
         @click="openProjectBrowser"
         class="action-btn browse-btn"
         :disabled="isImporting || isLoadingProject"
@@ -123,74 +138,139 @@
       </div>
 
       <div class="assembly-tree">
-        <h3>Assembly Tree</h3>
-        <ul class="part-list">
-          <li
-            v-for="part in assembly"
-            :key="part.id"
-            class="part-item"
-            :class="{ selected: part.id === selectedItemId }"
-            @click="selectItem(part.id)"
-          >
-            <div class="part-header">
-              <label
-                class="visibility-toggle"
-                :title="part.visible ? 'Hide part' : 'Show part'"
-                @click.stop
-              >
-                <input
-                  type="checkbox"
-                  :checked="part.visible"
-                  @change="setPartVisibility(part.id, $event)"
-                />
-                Show
-              </label>
+        <template v-if="isDiffMode">
+          <div class="diff-list-header">
+            <h3>Diff Parts</h3>
+            <button
+              type="button"
+              class="diff-helper-btn"
+              :disabled="!hasUnchangedDiffItems"
+              @click="handleToggleUnchangedVisibility"
+            >
+              {{ hasVisibleUnchangedDiffItems ? "Hide Unchanged" : "Show Unchanged" }}
+            </button>
+          </div>
 
-              <span class="part-name">{{ part.name }}</span>
+          <p v-if="diffItems.length === 0 && !isLoadingDiff" class="dim empty-tree">
+            No diff parts available for the selected commits.
+          </p>
+
+          <ul v-else class="diff-part-list">
+            <li
+              v-for="item in diffItems"
+              :key="item.id"
+              class="diff-part-item"
+              :class="[`status-${item.status}`, { hidden: !item.visible }]"
+            >
+              <div class="diff-part-main">
+                <div class="diff-part-copy">
+                  <span class="diff-part-file">{{ item.filename }}</span>
+                  <span v-if="item.name !== item.filename" class="diff-part-name">
+                    {{ item.name }}
+                  </span>
+                </div>
+                <span class="diff-status-badge" :class="`status-${item.status}`">
+                  {{ formatDiffStatus(item.status) }}
+                </span>
+              </div>
 
               <button
-                class="delete-btn"
-                title="Remove part"
-                @click.stop="removePart(part.id)"
+                type="button"
+                class="diff-visibility-btn"
+                :class="{ inactive: !item.visible }"
+                :title="item.visible ? 'Hide part from diff view' : 'Show part in diff view'"
+                @click="toggleDiffItemVisibility(item.id)"
               >
-                Remove
+                {{ item.visible ? "Hide" : "Show" }}
               </button>
-            </div>
+            </li>
+          </ul>
+        </template>
 
-            <div class="part-coords">
-              <label>
-                X
-                <input
-                  type="number"
-                  :value="part.position[0]"
-                  step="1"
-                  class="coord-input"
-                  @input="setPartPosition(part.id, 'x', $event)"
-                />
-              </label>
-              <label>
-                Y
-                <input
-                  type="number"
-                  :value="part.position[1]"
-                  step="1"
-                  class="coord-input"
-                  @input="setPartPosition(part.id, 'y', $event)"
-                />
-              </label>
-              <label>
-                Z
-                <input
-                  type="number"
-                  :value="part.position[2]"
-                  step="1"
-                  class="coord-input"
-                  @input="setPartPosition(part.id, 'z', $event)"
-                />
-              </label>
-            </div>
-          </li>
-        </ul>
+        <template v-else>
+          <h3>Assembly Tree</h3>
+          <label class="text-field tree-search-field">
+            <span class="field-label">Search Parts</span>
+            <input
+              v-model="treeSearchQuery"
+              type="text"
+              class="text-input"
+              placeholder="Filter by part name or id"
+            />
+          </label>
+
+          <p v-if="filteredAssembly.length === 0" class="dim empty-tree">
+            No parts match the current search.
+          </p>
+
+          <ul class="part-list">
+            <li
+              v-for="part in filteredAssembly"
+              :key="part.id"
+              class="part-item"
+              :class="{ selected: part.id === selectedItemId }"
+              @click="selectItem(part.id)"
+            >
+              <div class="part-header">
+                <label
+                  class="visibility-toggle"
+                  :title="part.visible ? 'Hide part' : 'Show part'"
+                  @click.stop
+                >
+                  <input
+                    type="checkbox"
+                    :checked="part.visible"
+                    @change="setPartVisibility(part.id, $event)"
+                  />
+                  Show
+                </label>
+
+                <span class="part-name">{{ part.name }}</span>
+
+                <button
+                  class="delete-btn"
+                  title="Remove part"
+                  @click.stop="removePart(part.id)"
+                >
+                  Remove
+                </button>
+              </div>
+
+              <div class="part-coords">
+                <label>
+                  X
+                  <input
+                    type="number"
+                    :value="part.position[0]"
+                    step="1"
+                    class="coord-input"
+                    @input="setPartPosition(part.id, 'x', $event)"
+                  />
+                </label>
+                <label>
+                  Y
+                  <input
+                    type="number"
+                    :value="part.position[1]"
+                    step="1"
+                    class="coord-input"
+                    @input="setPartPosition(part.id, 'y', $event)"
+                  />
+                </label>
+                <label>
+                  Z
+                  <input
+                    type="number"
+                    :value="part.position[2]"
+                    step="1"
+                    class="coord-input"
+                    @input="setPartPosition(part.id, 'z', $event)"
+                  />
+                </label>
+              </div>
+            </li>
+          </ul>
+        </template>
       </div>
 
       <div v-if="isProjectMode" class="history-section">
@@ -211,6 +291,45 @@
                 @change="toggleDiffMode"
               />
               Compare Commits
+            </label>
+          </div>
+
+          <div v-if="isDiffMode" class="diff-visualization">
+            <div class="diff-mode-buttons" role="group" aria-label="Diff visualization mode">
+              <button
+                type="button"
+                class="diff-mode-btn"
+                :class="{ active: diffViewMode === 'overlay' }"
+                @click="diffViewMode = 'overlay'"
+              >
+                Ghost Overlay
+              </button>
+              <button
+                type="button"
+                class="diff-mode-btn"
+                :class="{ active: diffViewMode === 'csg' }"
+                @click="diffViewMode = 'csg'"
+              >
+                Exact Changes
+              </button>
+            </div>
+
+            <label
+              v-if="diffViewMode === 'overlay'"
+              class="diff-opacity-control"
+            >
+              <span>Crossfade Slider</span>
+              <input
+                v-model.number="diffOpacity"
+                type="range"
+                min="0"
+                max="1"
+                step="0.01"
+              />
+              <div class="diff-opacity-labels">
+                <span class="base-swatch">Base {{ baseOpacityPercent }}%</span>
+                <span class="head-swatch">Head {{ headOpacityPercent }}%</span>
+              </div>
             </label>
           </div>
 
@@ -248,82 +367,20 @@
             </label>
           </div>
 
-          <div v-if="isDiffMode" class="diff-visualization">
-            <div class="diff-mode-buttons" role="group" aria-label="Diff visualization mode">
-              <button
-                type="button"
-                class="diff-mode-btn"
-                :class="{ active: diffVisualizationMode === 'overlay' }"
-                @click="diffVisualizationMode = 'overlay'"
-              >
-                Overlay
-              </button>
-              <button
-                type="button"
-                class="diff-mode-btn"
-                :class="{ active: diffVisualizationMode === 'split' }"
-                @click="diffVisualizationMode = 'split'"
-              >
-                Split
-              </button>
-            </div>
-
-            <label
-              v-if="diffVisualizationMode === 'overlay'"
-              class="diff-opacity-control"
-            >
-              <span>Diff Opacity</span>
-              <input
-                v-model.number="diffOpacity"
-                type="range"
-                min="0"
-                max="1"
-                step="0.01"
-              />
-              <div class="diff-opacity-labels">
-                <span class="base-swatch">Base {{ baseOpacityPercent }}%</span>
-                <span class="head-swatch">Head {{ headOpacityPercent }}%</span>
-              </div>
-            </label>
-          </div>
-
-          <p class="dim">Red shows the base commit and green shows the head commit.</p>
+          <p class="dim">{{ diffModeDescription }}</p>
           <p v-if="isDiffMode && !canCompareSelectedCommits" class="diff-warning">
             Pick two different commits to render the mesh diff.
           </p>
           <p v-else-if="isLoadingDiff" class="dim">Building diff overlay...</p>
+          <p v-else-if="diffViewMode === 'csg' && isBuildingExactChanges" class="dim">
+            Building exact change volumes...
+          </p>
           <p v-else-if="diffError" class="diff-error">{{ diffError }}</p>
           <p v-else-if="isDiffMode && diffResult" class="dim">
-            {{ diffFiles.length }} changed file(s),
-            {{ diffManifestEntries.length }} manifest delta(s).
+            {{ diffItems.length }} part(s) in view,
+            {{ changedDiffItemCount }} changed,
+            {{ unchangedDiffItemCount }} unchanged.
           </p>
-
-          <ul v-if="isDiffMode && diffFiles.length > 0" class="diff-file-list">
-            <li
-              v-for="file in diffFiles"
-              :key="`${file.status}-${file.path}`"
-              class="diff-file-item"
-            >
-              <span class="diff-file-status">{{ file.status }}</span>
-              <span class="diff-file-path">{{ file.path }}</span>
-              <span v-if="file.geometry_changed" class="diff-file-flag">
-                geometry
-              </span>
-            </li>
-          </ul>
-
-          <ul
-            v-if="isDiffMode && diffManifestEntries.length > 0"
-            class="manifest-diff-list"
-          >
-            <li
-              v-for="entry in diffManifestEntries.slice(0, 6)"
-              :key="`${entry.change_type}-${entry.path}`"
-              class="manifest-diff-item"
-            >
-              {{ entry.message }}
-            </li>
-          </ul>
         </div>
 
         <ul class="commit-list">
@@ -343,9 +400,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useAssemblyTools } from "../composables/useAssemblyTools";
-import { useGitDiff } from "../composables/useGitDiff";
+import {
+  useGitDiff,
+  type DiffItemStatus,
+} from "../composables/useGitDiff";
 import { useProjectBrowser } from "../composables/useProjectBrowser";
 import { useStlImport } from "../composables/useStlImport";
 import { useVersioning } from "../composables/useVersioning";
@@ -379,6 +439,7 @@ const {
   checkoutCommit,
   commitHistory,
   isSavingVersion,
+  resetSession,
   saveAsNewProject,
   saveVersion,
   suggestedProjectName,
@@ -388,29 +449,63 @@ const { debugTargetName, isScaling, prepareWasm, scaleAssembly } =
   useAssemblyTools();
 const {
   diffError,
-  diffFiles,
-  diffManifestEntries,
+  diffItems,
   diffOpacity,
   diffResult,
-  diffVisualizationMode,
+  diffViewMode,
   isDiffMode,
   isLoadingDiff,
   loadDiff,
   selectedBaseSha,
   selectedHeadSha,
   setDiffMode,
+  setUnchangedDiffItemVisibility,
+  toggleDiffItemVisibility,
 } = useGitDiff();
 
 const commitMessage = ref("");
 const newProjectName = ref("");
+const treeSearchQuery = ref("");
 const selectedPartName = computed(() => selectedAssemblyItem.value?.name ?? null);
 const sessionModeLabel = computed(() => (isProjectMode.value ? "Project Mode" : "File Mode"));
 const sessionTitle = computed(
   () => activeProjectName.value?.trim() || "Unsaved Session",
 );
 const displayedProjectName = computed(() => sessionTitle.value);
+const filteredAssembly = computed(() => {
+  const query = treeSearchQuery.value.trim().toLowerCase();
+  if (!query) {
+    return assembly.value;
+  }
+
+  return assembly.value.filter((item) => {
+    return (
+      item.name.toLowerCase().includes(query) ||
+      item.id.toLowerCase().includes(query)
+    );
+  });
+});
+const unchangedDiffItems = computed(() =>
+  diffItems.value.filter((item) => item.status === "unchanged"),
+);
+const changedDiffItemCount = computed(
+  () => diffItems.value.length - unchangedDiffItems.value.length,
+);
+const unchangedDiffItemCount = computed(() => unchangedDiffItems.value.length);
+const hasUnchangedDiffItems = computed(() => unchangedDiffItems.value.length > 0);
+const hasVisibleUnchangedDiffItems = computed(() =>
+  unchangedDiffItems.value.some((item) => item.visible),
+);
 const canEnableDiff = computed(() => commitHistory.value.length > 1);
 const baseOpacityPercent = computed(() => Math.round((1 - diffOpacity.value) * 100));
+const diffModeDescription = computed(() =>
+  diffViewMode.value === "overlay"
+    ? "Red shows the base commit and green shows the head commit."
+    : "Green shows added volume, red shows removed volume, and gray shows shared geometry.",
+);
+const isBuildingExactChanges = computed(() =>
+  diffItems.value.some((item) => item.visible && item.isCsgHydrating),
+);
 const canCompareSelectedCommits = computed(
   () =>
     Boolean(versionTargetName.value) &&
@@ -419,6 +514,7 @@ const canCompareSelectedCommits = computed(
     selectedBaseSha.value !== selectedHeadSha.value,
 );
 const headOpacityPercent = computed(() => Math.round(diffOpacity.value * 100));
+let diffLoadTimer: ReturnType<typeof setTimeout> | null = null;
 
 watch(
   [isProjectMode, suggestedProjectName],
@@ -466,13 +562,30 @@ watch(
 watch(
   [isDiffMode, selectedBaseSha, selectedHeadSha, versionTargetName],
   ([diffModeEnabled, baseSha, headSha, projectName]) => {
+    if (diffLoadTimer) {
+      clearTimeout(diffLoadTimer);
+      diffLoadTimer = null;
+    }
+
     if (!diffModeEnabled || !projectName || !baseSha || !headSha || baseSha === headSha) {
       return;
     }
 
-    void loadDiff(projectName, baseSha, headSha);
+    diffLoadTimer = setTimeout(() => {
+      diffLoadTimer = null;
+      void loadDiff(projectName, baseSha, headSha);
+    }, 150);
   },
 );
+
+onBeforeUnmount(() => {
+  if (!diffLoadTimer) {
+    return;
+  }
+
+  clearTimeout(diffLoadTimer);
+  diffLoadTimer = null;
+});
 
 function setPartVisibility(itemId: string, event: Event): void {
   const target = event.target;
@@ -501,6 +614,14 @@ function toggleDiffMode(event: Event): void {
   setDiffMode(target.checked);
 }
 
+function formatDiffStatus(status: DiffItemStatus): string {
+  return status.charAt(0).toUpperCase() + status.slice(1);
+}
+
+function handleToggleUnchangedVisibility(): void {
+  setUnchangedDiffItemVisibility(!hasVisibleUnchangedDiffItems.value);
+}
+
 function handleSaveVersion(): void {
   void saveVersion(commitMessage.value);
 }
@@ -516,6 +637,13 @@ function handleSaveAsNewProject(): void {
 
 function openProjectBrowser(): void {
   void openBrowser();
+}
+
+function handleResetSession(): void {
+  treeSearchQuery.value = "";
+  commitMessage.value = "";
+  newProjectName.value = "";
+  resetSession();
 }
 </script>
 
@@ -570,7 +698,7 @@ p {
 }
 
 .action-btn:disabled {
-  cursor: wait;
+  cursor: not-allowed;
   opacity: 0.7;
 }
 
@@ -602,6 +730,14 @@ p {
 
 .browse-btn:hover {
   background-color: #0284c7;
+}
+
+.new-project-btn {
+  background-color: #475569;
+}
+
+.new-project-btn:hover {
+  background-color: #334155;
 }
 
 .versioning-section {
@@ -933,6 +1069,143 @@ p {
   background-color: #0f172a;
   border-radius: 6px;
   padding: 12px;
+}
+
+.tree-search-field {
+  margin-bottom: 10px;
+}
+
+.empty-tree {
+  margin-bottom: 10px;
+}
+
+.diff-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.diff-helper-btn {
+  border: 1px solid #334155;
+  border-radius: 999px;
+  background: #1e293b;
+  color: #cbd5e1;
+  padding: 6px 10px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.diff-helper-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.diff-part-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.diff-part-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px;
+  background-color: #1e293b;
+  border-radius: 6px;
+  border: 1px solid #334155;
+}
+
+.diff-part-item.hidden {
+  opacity: 0.7;
+}
+
+.diff-part-main {
+  min-width: 0;
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+}
+
+.diff-part-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.diff-part-file,
+.diff-part-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-part-file {
+  color: #e2e8f0;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.diff-part-name {
+  color: #94a3b8;
+  font-size: 0.72rem;
+}
+
+.diff-status-badge {
+  flex-shrink: 0;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.diff-status-badge.status-added {
+  background: rgba(34, 197, 94, 0.18);
+  color: #86efac;
+}
+
+.diff-status-badge.status-modified {
+  background: rgba(59, 130, 246, 0.18);
+  color: #93c5fd;
+}
+
+.diff-status-badge.status-removed {
+  background: rgba(239, 68, 68, 0.18);
+  color: #fca5a5;
+}
+
+.diff-status-badge.status-unchanged {
+  background: rgba(148, 163, 184, 0.18);
+  color: #cbd5e1;
+}
+
+.diff-visibility-btn {
+  flex-shrink: 0;
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  border-radius: 6px;
+  background: rgba(37, 99, 235, 0.15);
+  color: #dbeafe;
+  padding: 6px 10px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.diff-visibility-btn.inactive {
+  background: rgba(51, 65, 85, 0.5);
+  border-color: rgba(100, 116, 139, 0.45);
+  color: #cbd5e1;
 }
 
 .part-list {

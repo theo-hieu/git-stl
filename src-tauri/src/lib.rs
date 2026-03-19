@@ -1,3 +1,4 @@
+use base64::prelude::{Engine as _, BASE64_STANDARD};
 use git2::{DiffOptions, ErrorCode, ObjectType, Repository, Signature, Sort, Tree};
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -22,6 +23,7 @@ struct CommitHistoryEntry {
 struct LocalProjectSummary {
     name: String,
     modified_at: u64,
+    thumbnail_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -82,6 +84,35 @@ fn resolve_project_directory(app: &AppHandle, project_name: &str) -> Result<Path
     Ok(app_data_dir
         .join("STL_Viewer_Projects")
         .join(sanitize_project_segment(project_name)))
+}
+
+fn write_thumbnail_png(
+    project_dir: &Path,
+    thumbnail_base64: Option<&str>,
+) -> Result<(), String> {
+    let Some(thumbnail_base64) = thumbnail_base64
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+
+    let encoded_payload = thumbnail_base64
+        .strip_prefix("data:image/png;base64,")
+        .unwrap_or(thumbnail_base64);
+    let image_bytes = BASE64_STANDARD
+        .decode(encoded_payload)
+        .map_err(|error| format!("Failed to decode thumbnail.png payload: {error}"))?;
+    let thumbnail_path = project_dir.join("thumbnail.png");
+
+    fs::write(&thumbnail_path, image_bytes).map_err(|error| {
+        format!(
+            "Failed to write thumbnail image to \"{}\": {error}",
+            thumbnail_path.display()
+        )
+    })?;
+
+    Ok(())
 }
 
 fn modified_time_millis(path: &Path) -> u64 {
@@ -381,7 +412,12 @@ fn delta_status_name(delta: git2::Delta) -> String {
 }
 
 #[tauri::command]
-fn commit_assembly(app: AppHandle, project_name: String, message: String) -> Result<bool, String> {
+fn commit_assembly(
+    app: AppHandle,
+    project_name: String,
+    message: String,
+    thumbnail_base64: Option<String>,
+) -> Result<bool, String> {
     let project_dir = resolve_project_directory(&app, &project_name)?;
     fs::create_dir_all(&project_dir).map_err(|error| {
         format!(
@@ -389,6 +425,7 @@ fn commit_assembly(app: AppHandle, project_name: String, message: String) -> Res
             project_dir.display()
         )
     })?;
+    write_thumbnail_png(&project_dir, thumbnail_base64.as_deref())?;
 
     let repository = Repository::init(&project_dir).map_err(|error| {
         format!(
@@ -403,6 +440,14 @@ fn commit_assembly(app: AppHandle, project_name: String, message: String) -> Res
     index
         .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
         .map_err(|error| format!("Failed to stage files: {error}"))?;
+    index
+        .add_path(Path::new("manifest.json"))
+        .map_err(|error| format!("Failed to stage manifest.json: {error}"))?;
+    if project_dir.join("thumbnail.png").is_file() {
+        index
+            .add_path(Path::new("thumbnail.png"))
+            .map_err(|error| format!("Failed to stage thumbnail.png: {error}"))?;
+    }
     index
         .update_all(["*"].iter(), None)
         .map_err(|error| format!("Failed to refresh tracked files in the index: {error}"))?;
@@ -520,10 +565,15 @@ fn get_local_projects(app: AppHandle) -> Result<Vec<LocalProjectSummary>, String
             continue;
         }
 
+        let thumbnail_path = project_path.join("thumbnail.png");
+
         let project_dir_name = entry.file_name().to_string_lossy().to_string();
         projects.push(LocalProjectSummary {
             name: resolve_project_display_name(&project_dir_name, &manifest_path),
             modified_at: modified_time_millis(&manifest_path),
+            thumbnail_path: thumbnail_path
+                .is_file()
+                .then(|| thumbnail_path.to_string_lossy().to_string()),
         });
     }
 
